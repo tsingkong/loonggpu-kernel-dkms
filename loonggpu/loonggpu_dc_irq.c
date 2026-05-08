@@ -6,6 +6,7 @@
 #include "loonggpu_dc_reg.h"
 #include "loonggpu_dc_i2c.h"
 #include "loonggpu_dc_interface.h"
+#include "loonggpu_dc_dp.h"
 
 #define DM_IRQ_TABLE_LOCK(adev, flags) \
 	spin_lock_irqsave(&adev->dc->irq_handler_list_table_lock, flags)
@@ -50,10 +51,24 @@ void dc_handle_vsync_irq(void *interrupt_params)
 	struct loonggpu_crtc *loonggpu_crtc = interrupt_params;
 	struct drm_device *dev = loonggpu_crtc->base.dev;
 	unsigned long flags;
+	struct work_struct *work = NULL;
 
 	if (loonggpu_crtc == NULL) {
 		DRM_DEBUG_DRIVER("CRTC is null, returning.\n");
 		return;
+	}
+
+	spin_lock_irqsave(&dev->event_lock, flags);
+	if (loonggpu_crtc->pflip_copy == LOONGGPU_FLIP_COPY_NONE
+					&& !loonggpu_crtc->disp_work_status) {
+		work = &loonggpu_crtc->disp_work;
+		loonggpu_crtc->disp_work_status = 1;
+	}
+	spin_unlock_irqrestore(&dev->event_lock, flags);
+
+	if (work) {
+		if (!queue_work(system_unbound_wq, work))
+			DRM_INFO("Irq schedule disp work FAILED\n");
 	}
 
 	drm_handle_vblank(dev, loonggpu_crtc->crtc_id);
@@ -189,14 +204,14 @@ bool ls2k3000_dc_hpd_enable(struct loonggpu_device *adev, uint32_t link, bool en
 		if (enable)
 			int_reg |= 5;
 		else
-			int_reg &= 5;
+			int_reg &= ~5U;
 
 		break;
 	case 1:
 		if (enable)
 			int_reg |= 10;
 		else
-			int_reg &= 10;
+			int_reg &= ~10U;
 
 		break;
 	default:
@@ -1082,6 +1097,7 @@ static irqreturn_t loonggpu_dc_irq_handler(int irq, void *arg)
 	struct loonggpu_iv_entry entry;
 	unsigned long base;
 	u32 int_reg;
+	u32 int_en;
 	int i = 1;
 
 	base = (unsigned long)(adev->loongson_dc_rmmio_base);
@@ -1105,7 +1121,8 @@ static irqreturn_t loonggpu_dc_irq_handler(int irq, void *arg)
 		i++;
 	}
 
-	if (dc->hw_ops->dp_hpd_handler)
+	int_en	= dc_readl(adev, gdc_reg->global_reg.intr_en);
+	if (dc->hw_ops->dp_hpd_handler && is_dp_hpd_irq(int_en))
 		dc->hw_ops->dp_hpd_handler(adev, &entry);
 
 	return IRQ_HANDLED;

@@ -473,6 +473,13 @@ void loonggpu_lgkcd_debug_mem_fence(struct loonggpu_device *adev)
 int loonggpu_lgkcd_send_close_event_drain_irq(struct loonggpu_device *adev,
 					uint32_t *payload)
 {
+	int ret;
+
+	/* Device or IH ring is not ready so bail. */
+	ret = loonggpu_ih_wait_on_checkpoint_process_ts(adev, &adev->irq.ih);
+	if (ret)
+		return ret;
+
 	/* Send payload to fence KCD interrupts */
 	loonggpu_lgkcd_interrupt(adev, payload);
 

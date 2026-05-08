@@ -2,6 +2,7 @@
 #include "loonggpu.h"
 #include "loonggpu_dvfs.h"
 #include "loonggpu_common.h"
+#include "loonggpu_dc_vbios.h"
 
 #define LG2XX_POWER_OPCODE 0x51000000
 
@@ -33,9 +34,6 @@ static int dvfs_set_gpu_power_level(struct loonggpu_device *adev,
 {
 	struct loonggpu_dvfs *dvfs = &adev->pm.dpm.dvfs;
 
-	if (!loonggpu_dpm && adev->pm.dpm.bios_support)
-		return 0;
-
 	if (!level)
 		return 0;
 
@@ -47,6 +45,9 @@ static int dvfs_set_gpu_power_level(struct loonggpu_device *adev,
 
 	dvfs->cur_power_level = level;
 	spin_unlock(&dvfs->capture_lock);
+
+	if (!loonggpu_dpm || !adev->pm.dpm.bios_support)
+		return 0;
 
 	mb();
 
@@ -255,25 +256,37 @@ static void dvfs_init_single_table(struct loonggpu_device *adev)
 		&adev->pm.dpm.dvfs.sclk_table;
 	struct loonggpu_dvfs_single_table *mclk_table =
 		&adev->pm.dpm.dvfs.mclk_table;
+	struct loonggpu_dvfs_single_table  *p_sclk_table = &default_sclk;
 	u32 sclk = adev->clock.default_sclk / 100;
+	struct dpm_config_resource *dpm_config_res = NULL;
+	bool dpm_config_active = false;
 	int i, j;
 
-	for (i = 0, j = 0; i < default_sclk.count; i++) {
-		if (!default_sclk.dvfs_levels[i].enabled)
+	dpm_config_res = dc_get_vbios_resource(adev->dc->vbios, 0,
+				LOONGGPU_RESOURCE_DPM_CONFIG);
+	if (dpm_config_res && dpm_config_res->enable) {
+		p_sclk_table = &dpm_config_res->sclk_table;
+		dpm_config_active = true;
+	}
+
+	/* init sclk table */
+	for (i = 0, j = 0; i < p_sclk_table->count; i++) {
+		if (!p_sclk_table->dvfs_levels[i].enabled)
 			continue;
 
 		/* driver module default config sclk = 900 Mhz.
 		 * If the obtained frequency is not 900 MHz, it
 		 * needs to be corrected.
 		 */
-		if (sclk != 900)
-			default_sclk.dvfs_levels[i].value = sclk * 5 /
-				(5 + default_sclk.dvfs_levels[i].level);
+		if (!dpm_config_active && sclk != 900)
+			p_sclk_table->dvfs_levels[i].value = sclk * 5 /
+				(5 + p_sclk_table->dvfs_levels[i].level);
 
-		sclk_table->dvfs_levels[j++] = default_sclk.dvfs_levels[i];
+		sclk_table->dvfs_levels[j++] = p_sclk_table->dvfs_levels[i];
 	}
 	sclk_table->count = j;
 
+	/* init mclk table */
 	mclk_table->count = 1;
 	for (i = 0; i < mclk_table->count; i++) {
 		mclk_table->dvfs_levels[i].enabled = true;

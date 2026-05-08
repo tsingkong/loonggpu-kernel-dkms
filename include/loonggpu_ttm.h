@@ -12,6 +12,9 @@
 #define LOONGGPU_PL_FLAG_DOORBELL		(TTM_PL_FLAG_PRIV << 0)
 #define LOONGGPU_GTT_MAX_TRANSFER_SIZE	512
 #define LOONGGPU_GTT_NUM_TRANSFER_WINDOWS	2
+
+#define LOONGGPU_VRAM_MAX_TRANSFER_SIZE    4096
+#define LOONGGPU_VRAM_NUM_TRANSFER_WINDOWS     2
 uint64_t loonggpu_ttm_domain_start(struct loonggpu_device *adev, uint32_t type);
 
 struct loonggpu_vram_mgr {

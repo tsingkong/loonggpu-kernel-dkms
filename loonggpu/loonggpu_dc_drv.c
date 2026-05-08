@@ -20,6 +20,8 @@
 #include "loonggpu_dc_dp.h"
 #include "bridge_phy.h"
 #include "loonggpu_helper.h"
+#include "loonggpu_bpipe.h"
+#include "loonggpu_dc_resource.h"
 #if defined(DRM_DRM_ATOMIC_UAPI_H_PRESENT)
 #include <drm/drm_atomic_uapi.h>
 #endif
@@ -1429,6 +1431,9 @@ static void loonggpu_dc_do_flip(struct drm_crtc *crtc,
 	struct loonggpu_framebuffer *afb = to_loonggpu_framebuffer(fb);
 	struct loonggpu_bo *abo = gem_to_loonggpu_bo(fb->obj[0]);
 	struct loonggpu_device *adev = crtc->dev->dev_private;
+	struct loonggpu_dc *dc = adev->dc;
+	struct drm_display_mode *native_mode = &dc->native_mode;
+	struct loonggpu_ring *ring = &adev->bpipe.ring;
 	lg_dma_resv_t *resv;
 	uint64_t crtc_array_mode, crtc_address;
 	int align = 64;
@@ -1473,16 +1478,6 @@ static void loonggpu_dc_do_flip(struct drm_crtc *crtc,
 		usleep_range(1000, 1100);
 	}
 
-	/* Flip */
-	spin_lock_irqsave(&crtc->dev->event_lock, flags);
-
-	WARN_ON(acrtc->pflip_status != LOONGGPU_FLIP_NONE);
-
-	if (acrtc->base.state->event)
-		prepare_flip_isr(acrtc);
-
-	spin_unlock_irqrestore(&crtc->dev->event_lock, flags);
-
 	crtc_array_mode = LOONGGPU_TILING_GET(abo->tiling_flags, ARRAY_MODE);
 
 	if (crtc_array_mode == 0 && crtc->x) {
@@ -1525,6 +1520,94 @@ static void loonggpu_dc_do_flip(struct drm_crtc *crtc,
 	plane->primary.crtc_y = crtc->y;
 	plane->primary.stride = afb->base.pitches[0];
 	plane->primary.unzip_mode = (abo->flags & LOONGGPU_GEM_CREATE_COMPRESSED_MASK) >> 9;
+
+	if (acrtc->disp_scale
+		&& ((crtc->mode.hdisplay * crtc->mode.vdisplay)
+		< (native_mode->hdisplay * native_mode->vdisplay))
+		&& loonggpu_dc_get_disp_bo(adev)) {
+		struct display_bo *disp_bo = dc->scanout_bo;
+
+		struct bpipe_box sbox = {0};
+		struct bpipe_box dbox = {0};
+		struct bpipe_buffer sbo = {0};
+		struct bpipe_buffer dbo = {0};
+
+		sbox.x1 = 0;
+		sbox.y1 = 0;
+		sbox.x2 = crtc->mode.hdisplay;
+		sbox.y2 = crtc->mode.vdisplay;
+
+		sbo.width = crtc->mode.hdisplay;
+		sbo.height = crtc->mode.vdisplay;
+		sbo.pitch = afb->base.pitches[0] / afb->base.format->cpp[0];
+		sbo.bpp = (afb->base.format->cpp[0] << 3);
+
+		/*
+		 * FIXME: Source vram address mapping is required for each copy,
+		 * dynamic mapping needs to be implemented based on the source address.
+		 */
+		r = bpipe_map_vram_buffer(abo, 0, fb->obj[0]->size, 0, ring, &sbo.addr);
+		if (r) {
+			DRM_ERROR("%s : bpipe_map_vram_buffer src error\r\n", __FUNCTION__);
+			WARN_ON(1);
+		}
+
+		sbo.addr += (afb->address - crtc_address);
+
+		dbox.x1 = 0;
+		dbox.y1 = 0;
+		dbox.x2 = native_mode->hdisplay;
+		dbox.y2 = native_mode->vdisplay;
+
+		dbo.width = native_mode->hdisplay;
+		dbo.height = native_mode->vdisplay;
+		dbo.pitch = disp_bo->pitch / disp_bo->cpp;
+		dbo.bpp = (disp_bo->cpp << 3);
+
+		/*
+		 * FIXME: Destination vram address mapping is required for each copy,
+		 * map once at startup in the future.
+		 */
+		r = bpipe_map_vram_buffer(disp_bo->handle, 0, disp_bo->size, 1, ring, &dbo.addr);
+		if (r) {
+			DRM_ERROR("%s : bpipe_map_vram_buffer dst error\r\n", __FUNCTION__);
+			WARN_ON(1);
+		}
+
+		switch (crtc_array_mode) {
+		case 2:
+			sbo.tiling = BPIPE_TILING_ARRAY_MODE_TILED4;
+			dbo.tiling = BPIPE_TILING_ARRAY_MODE_TILED4;
+			break;
+		case 0:
+		default:
+			sbo.tiling = BPIPE_TILING_ARRAY_MODE_LINEAR;
+			dbo.tiling = BPIPE_TILING_ARRAY_MODE_LINEAR;
+			break;
+		}
+
+		r = bpipe_draw_cs_copy(ring, &sbox, &dbox, &sbo, &dbo);
+		if (r) {
+			DRM_ERROR("%s : bpipe_draw_cs_copy error\r\n", __FUNCTION__);
+		}
+
+		plane->primary.address.low_part = lower_32_bits(disp_bo->gpu_addr);
+		plane->primary.address.high_part = upper_32_bits(disp_bo->gpu_addr);
+
+		spin_lock_irqsave(&crtc->dev->event_lock, flags);
+		acrtc->pflip_copy = LOONGGPU_FLIP_COPY_DONE;
+		spin_unlock_irqrestore(&crtc->dev->event_lock, flags);
+	}
+
+	/* Flip */
+	spin_lock_irqsave(&crtc->dev->event_lock, flags);
+
+	WARN_ON(acrtc->pflip_status != LOONGGPU_FLIP_NONE);
+
+	if (acrtc->base.state->event)
+		prepare_flip_isr(acrtc);
+
+	spin_unlock_irqrestore(&crtc->dev->event_lock, flags);
 
 	dc_submit_plane_update(adev->dc, acrtc->crtc_id, plane);
 
@@ -1615,6 +1698,9 @@ static void loonggpu_dc_commit_planes(struct drm_atomic_state *state,
 		struct drm_framebuffer *drm_fb;
 		int align = 64;
 		uint64_t address;
+
+		struct loonggpu_dc *dc = adev->dc;
+		struct drm_display_mode *native_mode = &dc->native_mode;
 
 		struct loonggpu_framebuffer *afb =
 				to_loonggpu_framebuffer(modeset_fbs[0]);
@@ -1726,6 +1812,35 @@ static void loonggpu_dc_commit_planes(struct drm_atomic_state *state,
 		plane->primary.crtc_y = y;
 		plane->primary.stride = timing->stride;
 		plane->primary.unzip_mode = (bo->flags & LOONGGPU_GEM_CREATE_COMPRESSED_MASK) >> 9;
+
+		if (acrtc->disp_scale
+			&& ((mode->hdisplay * mode->vdisplay)
+			< (native_mode->hdisplay * native_mode->vdisplay))
+			&& loonggpu_dc_get_disp_bo(adev)) {
+			struct display_bo *disp_bo = dc->scanout_bo;
+
+			spin_lock_irqsave(&pcrtc->dev->event_lock, flags);
+			acrtc->pflip_copy = LOONGGPU_FLIP_COPY_NONE;
+			spin_unlock_irqrestore(&pcrtc->dev->event_lock, flags);
+
+			memset(disp_bo->cpu_ptr, 0x0, disp_bo->size);
+
+			plane->primary.address.low_part = lower_32_bits(disp_bo->gpu_addr);
+			plane->primary.address.high_part = upper_32_bits(disp_bo->gpu_addr);
+
+			timing->depth = (disp_bo->cpp << 3);
+			timing->stride = disp_bo->pitch;
+			timing->hdisplay = native_mode->hdisplay;
+			timing->htotal = native_mode->htotal;
+			timing->hsync_start = native_mode->hsync_start;
+			timing->hsync_end  = native_mode->hsync_end;
+			timing->vdisplay = native_mode->vdisplay;
+			timing->vtotal = native_mode->vtotal;
+			timing->vsync_start = native_mode->vsync_start;
+			timing->vsync_end = native_mode->vsync_end;
+
+			mode = native_mode;
+		}
 
 		dc_submit_plane_update(adev->dc, acrtc->crtc_id, plane);
 
@@ -2046,6 +2161,98 @@ static int dc_early_init(void *handle)
 		case dev_9a1000:
 			adev->mode_info.funcs = &video_display_funcs;
 			break;
+		}
+	}
+
+	return 0;
+}
+
+struct display_bo *loonggpu_dc_get_disp_bo(struct loonggpu_device *adev)
+{
+    struct loonggpu_dc *dc = adev->dc;
+
+    if (dc->disp_bo[0].handle && dc->disp_bo[1].handle) {
+		dc->scanout_bo = &dc->disp_bo[dc->scanout_id];
+        dc->scanout_id ^= 1;
+        return dc->scanout_bo;
+    }
+
+    return NULL;
+}
+
+int loonggpu_dc_scale_init(struct loonggpu_device *adev)
+{
+	int r = 0, i = 0;
+	struct loonggpu_dc *dc = adev->dc;
+	struct drm_connector *connector = NULL;
+	struct drm_display_mode *mode = NULL;
+	struct display_bo *disp_bo = NULL;
+
+	if (adev->family_type != CHIP_LG200
+		&& adev->family_type != CHIP_LG210) {
+		DRM_INFO("%s: family_type:%d no bpipe, not support scaling.\n",
+									__func__, adev->family_type);
+		return 0;
+	}
+
+	list_for_each_entry(connector, &adev->ddev->mode_config.connector_list, head) {
+		struct scale_resource *scale_res = NULL;
+		scale_res = dc_get_vbios_resource(dc->vbios,
+						connector->index, LOONGGPU_RESOURCE_SCALE);
+		if (scale_res) {
+			mode = list_first_entry_or_null(&connector->modes,
+											struct drm_display_mode, head);
+			adev->mode_info.crtcs[connector->index]->disp_scale = scale_res->enable;
+			break;
+		}
+	}
+
+	if (mode) {
+		dc->native_mode = *mode;
+
+		DRM_INFO("%s: native_mode: hdisplay:%d vdisplay:%d vrefresh:%d\n",
+			__func__, dc->native_mode.hdisplay, dc->native_mode.vdisplay,
+			drm_mode_vrefresh(&dc->native_mode));
+
+		for (i = 0; i < 2; i++) {
+			disp_bo = &dc->disp_bo[i];
+			if (!disp_bo->handle) {
+				disp_bo->cpp = DIV_ROUND_UP(32, 8);
+				disp_bo->pitch = loonggpu_align_pitch(adev,
+							dc->native_mode.hdisplay, disp_bo->cpp, 0);
+				disp_bo->size = (u64)disp_bo->pitch * dc->native_mode.vdisplay;
+				disp_bo->size = ALIGN(disp_bo->size, PAGE_SIZE);
+
+				r = loonggpu_bo_create_kernel(adev, disp_bo->size,
+								LOONGGPU_GPU_PAGE_SIZE,
+								LOONGGPU_GEM_DOMAIN_VRAM,
+								&disp_bo->handle, &disp_bo->gpu_addr,
+								(void **)&disp_bo->cpu_ptr);
+				if (r) {
+					DRM_ERROR("%s: create display bo[%d] error\r\n", __func__, i);
+					return r;
+				}
+				memset(disp_bo->cpu_ptr, 0x0, disp_bo->size);
+				DRM_INFO("%s: create display bo[%d]: gpu_addr:0x%llx pitch:%d size:%d\n",
+							__func__, i, disp_bo->gpu_addr, disp_bo->pitch, disp_bo->size);
+			}
+		}
+	}
+
+	return r;
+}
+
+int loonggpu_dc_scale_fini(struct loonggpu_device *adev)
+{
+	struct loonggpu_dc *dc = adev->dc;
+	struct display_bo *disp_bo = NULL;
+	int i = 0;
+
+	for (i = 0; i < 2; i++) {
+		disp_bo = &dc->disp_bo[i];
+		if (disp_bo->handle) {
+			loonggpu_bo_free_kernel(&disp_bo->handle,
+					&disp_bo->gpu_addr, (void **)&disp_bo->cpu_ptr);
 		}
 	}
 

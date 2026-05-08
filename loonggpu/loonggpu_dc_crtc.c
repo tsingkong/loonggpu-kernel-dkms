@@ -11,6 +11,7 @@
 #include "loonggpu_backlight.h"
 #include "loonggpu_helper.h"
 #include "loonggpu_dc_dp.h"
+#include "loonggpu_bpipe.h"
 
 static unsigned int
 cal_freq(unsigned int pixclock_khz, struct pixel_clock *pll_config)
@@ -68,11 +69,11 @@ retry:
 
 	value = dc_readl(adev, gdc_reg->crtc_reg[link].cfg);
 	value &= ~(CRTC_CFG_RESET | CRTC_CFG_ENABLE);
-	dc_writel_check(adev, gdc_reg->crtc_reg[link].cfg, value);
+	dc_writel(adev, gdc_reg->crtc_reg[link].cfg, value);
 	mdelay(10);
 
 	value |= CRTC_CFG_RESET | CRTC_CFG_ENABLE;
-	dc_writel_check(adev, gdc_reg->crtc_reg[link].cfg, value);
+	dc_writel(adev, gdc_reg->crtc_reg[link].cfg, value);
 	mdelay(30);
 
 	/* check buffer overflow */
@@ -648,6 +649,158 @@ static int loonggpu_crtc_gamma_set(struct drm_crtc *crtc, u16 *red, u16 *green,
 	return adev->dc->hw_ops->crtc_gamma_set(crtc, red, green, blue);
 }
 
+static void disp_work(struct work_struct *work)
+{
+	struct loonggpu_crtc *lcrtc = container_of(work,
+						struct loonggpu_crtc, disp_work);
+	struct drm_crtc *crtc = &lcrtc->base;
+	struct loonggpu_device *adev = crtc->dev->dev_private;
+	struct loonggpu_dc *dc = adev->dc;
+	struct drm_display_mode *native_mode = &dc->native_mode;
+	struct display_bo *disp_bo = dc->scanout_bo;
+	struct dc_plane_update plane = {0};
+	struct loonggpu_bo *bo = NULL;
+	struct loonggpu_framebuffer *lfb = NULL;
+	struct drm_framebuffer *fb = NULL, *drm_fb = NULL;
+	struct loonggpu_ring *ring = &adev->bpipe.ring;
+	struct bpipe_box sbox = {0};
+	struct bpipe_box dbox = {0};
+	struct bpipe_buffer sbo = {0};
+	struct bpipe_buffer dbo = {0};
+	unsigned long flags;
+	uint64_t tiling_flags = 0;
+	int array_mode;
+	int align = 64;
+	int x, y;
+	int r;
+
+	if (drm_drv_uses_atomic_modeset(crtc->dev)) {
+		//  atomic
+		if (crtc->primary->state) {
+			fb = crtc->primary->state->fb;
+			x = crtc->primary->state->crtc_x;
+			y = crtc->primary->state->crtc_y;
+		} else {
+			fb = NULL;
+			x = y = 0;
+		}
+	} else {
+		//  legacy
+		fb = crtc->primary->fb;
+		x = crtc->x;
+		y = crtc->y;
+	}
+
+	if (!fb)
+		return;
+
+	lfb = to_loonggpu_framebuffer(fb);
+	bo = gem_to_loonggpu_bo(lfb->base.obj[0]);
+
+	r = loonggpu_bo_reserve(bo, false);
+	if (unlikely(r)) {
+		if (r != -ERESTARTSYS)
+			DRM_ERROR("Unable to reserve buffer: %d\n", r);
+		return;
+	}
+	loonggpu_bo_get_tiling_flags(bo, &tiling_flags);
+	loonggpu_bo_unreserve(bo);
+
+	array_mode = LOONGGPU_TILING_GET(tiling_flags, ARRAY_MODE);
+
+	/* The width of FB is used to calculate the DMA length when
+		* the screen is rotated */
+	mutex_lock(&crtc->dev->mode_config.fb_lock);
+	drm_for_each_fb(drm_fb, crtc->dev) {
+		struct loonggpu_framebuffer *afb = to_loonggpu_framebuffer(drm_fb);
+		if (drm_fb->width < 480 || !strcmp(drm_fb->comm, "fbcon"))
+			continue;
+		if (x != 0 && (lfb != afb) && array_mode == 0) {
+			if (!(drm_fb->width % 64)) {
+				align = 64;
+			} else if (!(drm_fb->width % 32)) {
+				align = 32;
+			} else
+				DRM_INFO("Setting with unaligned fb width x: %d\n", drm_fb->width);
+		}
+	}
+	mutex_unlock(&crtc->dev->mode_config.fb_lock);
+
+	/* x is used to calculate the DMA length when the dual screen
+		* is arranged horizontally */
+	if (x != 0 && array_mode == 0) {
+		if (!(x % 64) && align >= 64) {
+			align = 64;
+		} else if (!(x % 32) && align >= 32) {
+			align = 32;
+		} else
+			DRM_INFO("Setting with unaligned screen x: %d\n", x);
+	}
+
+	sbox.x1 = 0;
+	sbox.y1 = 0;
+	sbox.x2 = crtc->mode.hdisplay;
+	sbox.y2 = crtc->mode.vdisplay;
+
+	sbo.width = crtc->mode.hdisplay;
+	sbo.height = crtc->mode.vdisplay;
+	sbo.pitch = lfb->base.pitches[0] / lfb->base.format->cpp[0];
+	sbo.bpp = (lfb->base.format->cpp[0] << 3);
+
+	r = bpipe_map_vram_buffer(bo, 0, lfb->base.obj[0]->size, 0, ring, &sbo.addr);
+	if (r) {
+		DRM_ERROR("%s : bpipe_map_vram_buffer src error\r\n", __FUNCTION__);
+	}
+
+	dbox.x1 = 0;
+	dbox.y1 = 0;
+	dbox.x2 = native_mode->hdisplay;
+	dbox.y2 = native_mode->vdisplay;
+
+	dbo.width = native_mode->hdisplay;
+	dbo.height = native_mode->vdisplay;
+	dbo.pitch = disp_bo->pitch / disp_bo->cpp;
+	dbo.bpp = (disp_bo->cpp << 3);
+
+	r = bpipe_map_vram_buffer(disp_bo->handle, 0, disp_bo->size, 1, ring, &dbo.addr);
+	if (r) {
+		DRM_ERROR("%s : bpipe_map_vram_buffer dst error\r\n", __FUNCTION__);
+	}
+
+	switch (array_mode) {
+	case 2:
+		y = (y + 3) & ~3;
+		x = ALIGN(x, 8);
+		sbo.addr = sbo.addr + y * lfb->base.pitches[0] + x * lfb->base.format->cpp[0] * 4;
+		sbo.tiling = BPIPE_TILING_ARRAY_MODE_TILED4;
+		dbo.tiling = BPIPE_TILING_ARRAY_MODE_TILED4;
+		break;
+	case 0:
+	default:
+		sbo.addr = sbo.addr + y * lfb->base.pitches[0] + ALIGN(x, align) * lfb->base.format->cpp[0];
+		sbo.tiling = BPIPE_TILING_ARRAY_MODE_LINEAR;
+		dbo.tiling = BPIPE_TILING_ARRAY_MODE_LINEAR;
+		break;
+	}
+
+	r = bpipe_draw_cs_copy(ring, &sbox, &dbox, &sbo, &dbo);
+	if (r) {
+		DRM_ERROR("%s : bpipe_draw_cs_copy error\r\n", __FUNCTION__);
+	}
+
+	plane.type = DC_PLANE_PRIMARY;
+	plane.primary.address.low_part = lower_32_bits(disp_bo->gpu_addr);
+	plane.primary.address.high_part = upper_32_bits(disp_bo->gpu_addr);
+
+	dc_submit_plane_update(adev->dc, lcrtc->crtc_id, &plane);
+
+	spin_lock_irqsave(&crtc->dev->event_lock, flags);
+	lcrtc->disp_work_status = 0;
+	spin_unlock_irqrestore(&crtc->dev->event_lock, flags);
+
+	return;
+}
+
 static const struct drm_crtc_funcs loonggpu_dc_crtc_funcs = {
 	.set_config = drm_atomic_helper_set_config,
 	.page_flip = drm_atomic_helper_page_flip,
@@ -698,6 +851,8 @@ int loonggpu_dc_crtc_init(struct loonggpu_device *adev,
 
 	acrtc->irq_source_vsync = DC_IRQ_TYPE_VSYNC + crtc_index;
 	acrtc->base.enabled = false;
+
+	INIT_WORK(&acrtc->disp_work, disp_work);
 
 	adev->mode_info.crtcs[crtc_index] = acrtc;
 

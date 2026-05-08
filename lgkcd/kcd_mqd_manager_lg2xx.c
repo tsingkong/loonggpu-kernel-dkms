@@ -171,11 +171,7 @@ static int debugfs_show_mqd_sdma(struct seq_file *m, void *data)
 
 static uint32_t read_doorbell_id(void *mqd)
 {
-	struct lg2xx_mqd *m;
-
-	m = get_mqd(mqd);
-
-	return m->doorbell_offset;
+	return 0;
 }
 
 struct mqd_manager *mqd_manager_init_lg2xx(enum KCD_MQD_TYPE type,

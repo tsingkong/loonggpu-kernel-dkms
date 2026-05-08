@@ -118,7 +118,14 @@ int loonggpu_doorbell_enable(struct loonggpu_device *adev, bool clear)
 	if (clear)
 		memset(adev->doorbell.rdb_cpu_addr, 0 , adev->doorbell.size);
 
-	writeb(adev->doorbell.rdb_gpu_addr, adev->rmmio + 0x700000);
+	/* Enable doorbell */
+	if (adev->rmmio_sc)
+		writel((uint32_t)(adev->doorbell.rdb_gpu_addr >> 22),
+			((void __iomem *)adev->rmmio_sc) + LG2XX_SC132_DOORBELL_REG);
+
+	loonggpu_cmd_exec(adev, GSCMD(LG2XX_ICMD32_MOP_DOORBELL, LG2XX_ICMD32_SOP_DB_ZEN),
+		lower_32_bits(adev->doorbell.rdb_gpu_addr),
+		upper_32_bits(adev->doorbell.rdb_gpu_addr));
 
 	loonggpu_cmd_exec(adev, GSCMD(LG2XX_ICMD32_MOP_DOORBELL, LG2XX_ICMD32_SOP_DB_ZEN), 0, 0);
 	adev->doorbell.is_enabled = true;
@@ -138,8 +145,8 @@ int loonggpu_doorbell_disable(struct loonggpu_device *adev)
 		return 0;
 
 	loonggpu_cmd_exec(adev, GSCMD(LG2XX_ICMD32_MOP_DOORBELL, LG2XX_ICMD32_SOP_DB_ZDIS), 0, 0);
-	
-	writeb(0, adev->rmmio + 0x700000);
+	if (adev->rmmio_sc)
+		writel(0, ((void __iomem *)adev->rmmio_sc) + LG2XX_SC132_DOORBELL_REG);
 	adev->doorbell.is_enabled = false;
 	DRM_INFO("DOORBELL of %uM disabled (table at 0x%016llX).\n",
 		 (unsigned)(adev->doorbell.size >> 20),
@@ -179,8 +186,8 @@ int loonggpu_doorbell_init(struct loonggpu_device *adev)
 	loonggpu_asic_init_doorbell_index(adev);
 
 	/* doorbell bar mapping */
-	adev->doorbell.base = pci_resource_start(adev->pdev, 2);
-	adev->doorbell.size = pci_resource_len(adev->pdev, 2);
+	adev->doorbell.base = adev->rmmio_base + 0x800000;
+	adev->doorbell.size = 0x400000;
 
 	adev->doorbell.num_kernel_doorbells =
 		min_t(u64, adev->doorbell.size / sizeof(u64),

@@ -1323,7 +1323,7 @@ static int loonggpu_ttm_tt_populate(lg_ttm_tt_populate_arg,
 		return 0;
 	}
 
-	if ((slave || gtt->is_share_sg) && ttm->sg) {
+	if ((slave || (gtt && gtt->is_share_sg)) && ttm->sg) {
 		lg_drm_prime_sg_to_addr_array;
 		lg_ttm_set_state_unbound(ttm);
 		lg_ttm_tt_set_populated(ttm);
@@ -1376,7 +1376,7 @@ static void loonggpu_ttm_tt_unpopulate(lg_ttm_tt_populate_arg)
 		return;
 	}
 
-	if (slave || gtt->is_share_sg)
+	if (slave || (gtt && gtt->is_share_sg))
 		return;
 
 	adev = loonggpu_ttm_adev(lg_ttm_backend_func_get_bdev);

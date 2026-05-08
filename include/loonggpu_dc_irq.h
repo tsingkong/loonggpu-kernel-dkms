@@ -61,61 +61,11 @@ enum dc_irq_source {
 	DC_IRQ_SOURCES_NUMBER
 };
 
-/**
- * @dp_hpd_irq_type:
- *
- *   - LS2K3000_EDP_DP_HPD_NULL: No hotplug interrupt occurred for both EDP and DP.
- *
- *   - LS2K3000_EDP_IN: EDP hpd interrupt asserted for plug-in event.
- *
- *   - LS2K3000_DP_IN: DP hpd interrupt asserted for plug-in event.
- *
- *   - LS2K3000_EDP_IN_DP_IN: EDP and DP simultaneous insertion hpd interrupt asserted.
- *
- *   - LS2K3000_EDP_OUT: EDP hpd interrupt asserted for removal.
- *
- *   - LS2K3000_EDP_ERR: EDP hpd interrupt asserted for simultaneous plug-in and unplug event.
- *
- *   - LS2K3000_EDP_OUT_DP_IN: EDP hpd interrupt and DP hpd interrupt asserted simultaneously
- *     for unplug and plug-in events respectively.
- *
- *   - LS2K3000_EDP_ERR_DP_IN: EDP hpd interrupt asserted for both plug-in and unplug events, and
- *     DP hpd interrupt asserted for plug-in event.
- *
- *   - LS2K3000_DP_OUT: DP hpd interrupt asserted for unplug event.
- *
- *   - LS2K3000_EDP_IN_DP_OUT: EDP plug-in and DP unplug hpd interrupts triggered simultaneously.
- *
- *   - LS2K3000_DP_ERR: DP hpd interrupt asserted for simultaneous plug-in and unplug events.
- *
- *   - LS2K3000_EDP_IN_DP_ERR: EDP plug-in and DP plug-in/unplug hpd interrupts triggered simultaneously.
- *
- *   - LS2K3000_EDP_OUT_DP_OUT: EDP and DP unplug hpd interrupts triggered concurrently.
- *
- *   - LS2K3000_EDP_ERR_DP_OUT: EDP hpd interrupt asserted for both plug-in and unplug events, and
- *     DP hpd interrupt asserted for unplug-event.
- *
- *   - LS2K3000_EDP_OUT_DP_ERR: EDP unplug and DP plug-in/unplug hpd interrupts triggered simultaneously.
- *
- *   - LS2K3000_EDP_ERR_DP_ERR: EDP plug-in/unplug and DP plug-in/unplug hpd interrupts triggered simultaneously.
- */
 enum dp_hpd_irq_type {
-	LS2K3000_EDP_DP_HPD_NULL,
-	LS2K3000_EDP_IN,
-	LS2K3000_DP_IN,
-	LS2K3000_EDP_IN_DP_IN,
-	LS2K3000_EDP_OUT,
-	LS2K3000_EDP_ERR,
-	LS2K3000_EDP_OUT_DP_IN,
-	LS2K3000_EDP_ERR_DP_IN,
-	LS2K3000_DP_OUT,
-	LS2K3000_EDP_IN_DP_OUT,
-	LS2K3000_DP_ERR,
-	LS2K3000_EDP_IN_DP_ERR,
-	LS2K3000_EDP_OUT_DP_OUT,
-	LS2K3000_EDP_ERR_DP_OUT,
-	LS2K3000_EDP_OUT_DP_ERR,
-	LS2K3000_EDP_ERR_DP_ERR,
+	DP_HPD_IN = 0x1,
+	DP_HPD_OUT = 0x2,
+	EDP_HPD_IN = 0x10,
+	EDP_HPD_OUT = 0x20,
 };
 
 enum irq_type {

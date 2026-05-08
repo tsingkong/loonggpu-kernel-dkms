@@ -18,6 +18,8 @@ enum resource_type {
 	LOONGGPU_RESOURCE_CONNECTOR,
 	LOONGGPU_RESOURCE_PANEL,
 	LOONGGPU_RESOURCE_LCD_CTRL,
+	LOONGGPU_RESOURCE_SCALE,
+	LOONGGPU_RESOURCE_DPM_CONFIG,
 	LOONGGPU_RESOURCE_MAX,
 };
 
@@ -101,6 +103,7 @@ struct connector_resource {
 	u32 edid_method;
 	u32 irq_gpio;
 	u32 gpio_placement;
+	bool multi_interface;  /* feature = 1  */
 };
 
 struct gpu_resource {
@@ -145,7 +148,7 @@ struct panel_resource {
 };
 
 struct lcd_ctrl_resource {
-  struct resource_object base;
+	struct resource_object base;
 	u32 feature;
 	u32 open_sequence;
 	u32 close_sequence;
@@ -157,6 +160,19 @@ struct lcd_ctrl_resource {
 	u8  gpio_detect_open_polarity;
 	u32 gpio_ctrl_vdd;
 	u32 gpio_ctrl_en;
+};
+
+struct scale_resource {
+	struct resource_object base;
+	u32 feature;
+	bool enable;
+};
+
+struct dpm_config_resource {
+	struct resource_object base;
+	u32 feature;
+	bool enable;
+	struct loonggpu_dvfs_single_table sclk_table;
 };
 
 enum gpio_placement {

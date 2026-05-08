@@ -1,6 +1,7 @@
 #include <linux/pci.h>
 #include "loonggpu.h"
 #include "loonggpu_drm.h"
+#include "loonggpu_mmu.h"
 
 /*
  * GART
@@ -85,7 +86,14 @@ int loonggpu_gart_table_vram_alloc(struct loonggpu_device *adev)
 		struct loonggpu_bo_param bp;
 
 		memset(&bp, 0, sizeof(bp));
-		bp.size = adev->gart.table_size;
+		/*
+		 * FIXME: Expand 256M at the end of gart table for bpipe hardware,
+		 * it can be optimized into the 256M gart table in the future.
+		 */
+		bp.size = adev->gart.table_size +
+			(LOONGGPU_VRAM_MAX_TRANSFER_SIZE *
+			LOONGGPU_VRAM_NUM_TRANSFER_WINDOWS *
+			LOONGGPU_MMU_PTE_SIZE);
 		bp.byte_align = PAGE_SIZE;
 		bp.domain = LOONGGPU_GEM_DOMAIN_VRAM;
 		bp.flags = LOONGGPU_GEM_CREATE_CPU_ACCESS_REQUIRED |

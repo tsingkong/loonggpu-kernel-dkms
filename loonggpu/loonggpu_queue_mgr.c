@@ -49,6 +49,15 @@ static int loonggpu_identity_map(struct loonggpu_device *adev,
 	case LOONGGPU_HW_IP_DMA:
 		*out_ring = &adev->xdma.instance[ring].ring;
 		break;
+	case LOONGGPU_HW_IP_BPIPE:
+		*out_ring = &adev->bpipe.ring;
+		break;
+	case LOONGGPU_HW_IP_EPIPE:
+		*out_ring = &adev->epipe.ring;
+		break;
+	case LOONGGPU_HW_IP_DPIPE:
+		*out_ring = &adev->dpipe.ring;
+		break;
 	default:
 		*out_ring = NULL;
 		DRM_ERROR("unknown HW IP type: %d\n", mapper->hw_ip);
@@ -65,6 +74,12 @@ static enum loonggpu_ring_type loonggpu_hw_ip_to_ring_type(int hw_ip)
 		return LOONGGPU_RING_TYPE_GFX;
 	case LOONGGPU_HW_IP_DMA:
 		return LOONGGPU_RING_TYPE_XDMA;
+	case LOONGGPU_HW_IP_BPIPE:
+		return LOONGGPU_RING_TYPE_BPIPE;
+	case LOONGGPU_HW_IP_EPIPE:
+		return LOONGGPU_RING_TYPE_EPIPE;
+	case LOONGGPU_HW_IP_DPIPE:
+		return LOONGGPU_RING_TYPE_DPIPE;
 	default:
 		DRM_ERROR("Invalid HW IP specified %d\n", hw_ip);
 		return -1;
@@ -188,6 +203,11 @@ int loonggpu_queue_mgr_map(struct loonggpu_device *adev,
 	case LOONGGPU_HW_IP_DMA:
 		ip_num_rings = adev->xdma.num_instances;
 		break;
+	case LOONGGPU_HW_IP_BPIPE:
+	case LOONGGPU_HW_IP_EPIPE:
+	case LOONGGPU_HW_IP_DPIPE:
+		ip_num_rings = 1;
+		break;
 	default:
 		DRM_DEBUG("unknown ip type: %d\n", hw_ip);
 		return -EINVAL;
@@ -210,6 +230,9 @@ int loonggpu_queue_mgr_map(struct loonggpu_device *adev,
 
 	switch (mapper->hw_ip) {
 	case LOONGGPU_HW_IP_GFX:
+	case LOONGGPU_HW_IP_BPIPE:
+	case LOONGGPU_HW_IP_EPIPE:
+	case LOONGGPU_HW_IP_DPIPE:
 		r = loonggpu_identity_map(adev, mapper, ring, out_ring);
 		break;
 	case LOONGGPU_HW_IP_DMA:

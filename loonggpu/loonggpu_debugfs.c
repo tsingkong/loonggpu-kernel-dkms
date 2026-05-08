@@ -467,19 +467,17 @@ static int loonggpu_debugfs_test_ring(struct seq_file *m, void *data)
 	}
 
 	seq_printf(m, "run ring test:\n");
-	ring = &adev->gfx.gfx_ring[0];
-	r = loonggpu_ring_test_ring(ring);
-	if (r)
-		seq_printf(m, "%s ring tests failed (%d).\n", ring->name, r);
-	else
-		seq_printf(m, "%s ring tests passed.\n", ring->name);
 
+	for (i = 0; i < LOONGGPU_MAX_RINGS; ++i) {
+		ring = adev->rings[i];
+		if (!ring || !ring->ready)
+			continue;
 
-	for (i = 0; i < adev->xdma.num_instances; i++) {
-		ring = &adev->xdma.instance[i].ring;
 		r = loonggpu_ring_test_ring(ring);
-		if (r)
+		if (r) {
 			seq_printf(m, "%s ring tests failed (%d).\n", ring->name, r);
+			DRM_ERROR("loonggpu: failed testing IB on %s ring (%d).\n", ring->name, i);
+		}
 		else
 			seq_printf(m, "%s ring tests passed.\n", ring->name);
 	}
@@ -536,6 +534,135 @@ static int loonggpu_debugfs_test_xdma(struct seq_file *m, void *data)
 	return 0;
 }
 
+static int loonggpu_debugfs_test_bpipe(struct seq_file *m, void *data)
+{
+
+	struct drm_info_node *node = (struct drm_info_node *) m->private;
+	struct drm_device *dev = node->minor->dev;
+	struct loonggpu_device *adev = dev->dev_private;
+	struct loonggpu_ring *ring;
+	int r = 0, i;
+
+	/* hold on the scheduler */
+	for (i = 0; i < LOONGGPU_MAX_RINGS; i++) {
+		ring = adev->rings[i];
+
+		if (!lg_ring_sched_thread_avai(ring))
+			continue;
+		lg_ring_sched_thread_park(ring);
+	}
+
+	seq_printf(m, "run bpipe test:\n");
+	ring = &adev->bpipe.ring;
+	r = loonggpu_ring_test_bpipe(ring, msecs_to_jiffies(5000));
+	if (r)
+		seq_printf(m, "%s ring tests failed (%d).\n", ring->name, r);
+	else
+		seq_printf(m, "%s ring tests passed.\n", ring->name);
+
+	/* go on the scheduler */
+	for (i = 0; i < LOONGGPU_MAX_RINGS; i++) {
+		struct loonggpu_ring *ring = adev->rings[i];
+
+		if (!lg_ring_sched_thread_avai(ring))
+			continue;
+		lg_ring_sched_thread_unpark(ring);
+	}
+
+	return 0;
+}
+
+static int loonggpu_debugfs_test_cs(struct seq_file *m, void *data)
+{
+
+	struct drm_info_node *node = (struct drm_info_node *) m->private;
+	struct drm_device *dev = node->minor->dev;
+	struct loonggpu_device *adev = dev->dev_private;
+	struct loonggpu_ring *ring;
+	int r = 0, i;
+
+	if (adev->family_type < CHIP_LG210) {
+		seq_printf(m, "Only family_type >= CHIP_LG210 is supported.\n");
+		return 0;
+	}
+
+	/* hold on the scheduler */
+	for (i = 0; i < LOONGGPU_MAX_RINGS; i++) {
+		ring = adev->rings[i];
+
+		if (!lg_ring_sched_thread_avai(ring))
+			continue;
+		lg_ring_sched_thread_park(ring);
+	}
+
+	seq_printf(m, "run cs test:\n");
+
+	for (i = 0; i < LOONGGPU_MAX_RINGS; ++i) {
+		ring = adev->rings[i];
+		if (!ring || !ring->ready)
+			continue;
+
+		r = loonggpu_ring_test_cs(ring, msecs_to_jiffies(5000));
+		if (r) {
+			seq_printf(m, "%s cs tests failed (%d).\n", ring->name, r);
+			DRM_ERROR("loonggpu: failed testing cs on %s ring (%d).\n", ring->name, i);
+		}
+		else
+			seq_printf(m, "%s cs tests passed.\n", ring->name);
+	}
+
+	/* go on the scheduler */
+	for (i = 0; i < LOONGGPU_MAX_RINGS; i++) {
+		struct loonggpu_ring *ring = adev->rings[i];
+
+		if (!lg_ring_sched_thread_avai(ring))
+			continue;
+		lg_ring_sched_thread_unpark(ring);
+	}
+
+	return 0;
+}
+
+static int loonggpu_debugfs_test_gfx_tl_ib(struct seq_file *m, void *data)
+{
+	struct drm_info_node *node = (struct drm_info_node *)m->private;
+	struct drm_device *dev = node->minor->dev;
+	struct loonggpu_device *adev = dev->dev_private;
+	int r = 0, i;
+
+	if (adev->family_type < CHIP_LG210) {
+		seq_printf(m, "Only family_type >= CHIP_LG210 is supported.\n");
+		return 0;
+	}
+
+	/* hold on the scheduler */
+	for (i = 0; i < LOONGGPU_MAX_RINGS; i++) {
+		struct loonggpu_ring *ring = adev->rings[i];
+
+		if (!lg_ring_sched_thread_avai(ring))
+			continue;
+		lg_ring_sched_thread_park(ring);
+	}
+
+	seq_printf(m, "run gfx two level ib test:\n");
+	r = loonggpu_ring_test_tl_ib(&adev->gfx.gfx_ring[0], msecs_to_jiffies(5000));
+	if (r <= 0)
+		seq_printf(m, "gfx ring two level ib tests failed (%d).\n", r);
+	else
+		seq_printf(m, "gfx ring two level ib test passed, spend time %dms\n", jiffies_to_msecs(msecs_to_jiffies(1000) * 5 - r));
+
+	/* go on the scheduler */
+	for (i = 0; i < LOONGGPU_MAX_RINGS; i++) {
+		struct loonggpu_ring *ring = adev->rings[i];
+
+		if (!lg_ring_sched_thread_avai(ring))
+			continue;
+		lg_ring_sched_thread_unpark(ring);
+	}
+
+	return 0;
+}
+
 static int loonggpu_debugfs_get_vbios_dump(struct seq_file *m, void *data)
 {
 	struct drm_info_node *node = (struct drm_info_node *) m->private;
@@ -571,6 +698,9 @@ static const struct drm_info_list loonggpu_debugfs_list[] = {
 	{"loonggpu_test_ib", &loonggpu_debugfs_test_ib},
 	{"loonggpu_test_ring", &loonggpu_debugfs_test_ring},
 	{"loonggpu_test_xdma", &loonggpu_debugfs_test_xdma},
+	{"loonggpu_test_bpipe", &loonggpu_debugfs_test_bpipe},
+	{"loonggpu_test_cs", &loonggpu_debugfs_test_cs},
+	{"loonggpu_test_gfx_tl_ib", &loonggpu_debugfs_test_gfx_tl_ib},
 	{"loonggpu_evict_vram", &loonggpu_debugfs_evict_vram},
 	{"loonggpu_evict_gtt", &loonggpu_debugfs_evict_gtt},
 };

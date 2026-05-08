@@ -118,6 +118,11 @@ static enum drm_mode_status ls7a2000_mode_valid(struct drm_connector *connector,
 			return MODE_BAD;
 	}
 
+	if (loonggpu_ls7a2000_mode_limit_soft) {
+		if (mode->hdisplay > 2560)
+			return MODE_BAD;
+	}
+
 	return MODE_OK;
 }
 

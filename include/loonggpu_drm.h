@@ -529,7 +529,10 @@ struct drm_loonggpu_gem_va {
 
 #define LOONGGPU_HW_IP_GFX          0
 #define LOONGGPU_HW_IP_DMA          2
-#define LOONGGPU_HW_IP_NUM          9
+#define LOONGGPU_HW_IP_DPIPE        5
+#define LOONGGPU_HW_IP_EPIPE        6
+#define LOONGGPU_HW_IP_BPIPE        8
+#define LOONGGPU_HW_IP_NUM          11
 
 #define LOONGGPU_HW_IP_INSTANCE_MAX_COUNT 1
 

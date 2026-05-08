@@ -911,8 +911,8 @@ static int kcd_mem_attach(struct loonggpu_device *adev, struct kgd_mem *mem,
 	pr_debug("\t add VA 0x%llx - 0x%llx to vm %p\n", va,
 			va + bo_size, vm);
 
-	if (adev == bo_adev ||
-		(loonggpu_ttm_tt_get_usermm(mem->bo->tbo.ttm) && reuse_dmamap(adev, bo_adev))) {
+	if ((mem->bo->tbo.type != ttm_bo_type_sg) && (adev == bo_adev ||
+		(loonggpu_ttm_tt_get_usermm(mem->bo->tbo.ttm) && reuse_dmamap(adev, bo_adev)))) {
 		/* Mappings on the local GPU, or VRAM mappings in the
 			* local hive, or userptr mapping can reuse dma map
 			* address space share the original BO

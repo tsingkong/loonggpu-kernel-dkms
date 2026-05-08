@@ -23,6 +23,9 @@
 
 enum loonggpu_ring_type {
 	LOONGGPU_RING_TYPE_GFX,
+	LOONGGPU_RING_TYPE_BPIPE,
+	LOONGGPU_RING_TYPE_DPIPE,
+	LOONGGPU_RING_TYPE_EPIPE,
 	LOONGGPU_RING_TYPE_XDMA,
 };
 
@@ -105,8 +108,11 @@ struct loonggpu_ring_funcs {
 			      uint64_t pd_addr);
 	/* testing functions */
 	int (*test_ring)(struct loonggpu_ring *ring);
+	int (*test_cs)(struct loonggpu_ring *ring, long timeout);
 	int (*test_ib)(struct loonggpu_ring *ring, long timeout);
+	int (*test_tl_ib)(struct loonggpu_ring *ring, long timeout);
 	int (*test_xdma)(struct loonggpu_ring *ring, long timeout);
+	int (*test_bpipe)(struct loonggpu_ring *ring, long timeout);
 	/* insert NOP packets */
 	void (*insert_nop)(struct loonggpu_ring *ring, uint32_t count);
 	void (*insert_start)(struct loonggpu_ring *ring);

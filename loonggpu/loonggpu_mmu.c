@@ -80,7 +80,7 @@ static int mmu_mc_init(struct loonggpu_device *adev)
 
 	/* set the gart size */
 	if (loonggpu_gart_size == -1) {
-		adev->gmc.gart_size = adev->gmc.aper_size;
+		adev->gmc.gart_size = 256ULL << 20;
 	/* base = 0x1000000000000; */
 	} else {
 		adev->gmc.gart_size = (u64)loonggpu_gart_size << 20;
@@ -254,7 +254,7 @@ static int mmu_gart_enable(struct loonggpu_device *adev)
 		loonggpu_cmd_exec(adev, LG2XX_ICMD32(LG2XX_ICMD32_MOP_MMU, LG2XX_ICMD32_SOP_MMU_USAFE), \
 				lower_32_bits(adev->dummy_page_addr), upper_32_bits(adev->dummy_page_addr));
 		loonggpu_cmd_exec(adev, LG2XX_ICMD32i(LG2XX_ICMD32_MOP_MMU, LG2XX_ICMD32_SOP_MMU_UPG, 0),
-				LOONGGPU_MMU_DIR_CTRL_256M_1LVL, 0);
+				LOONGGPU_MMU_DIR_CTRL_512M_1LVL, 0);
 
 		for (i = 1; i < LOONGGPU_NUM_OF_VMIDS + 4; i++) {
 			loonggpu_cmd_exec(adev, LG2XX_ICMD32i(LG2XX_ICMD32_MOP_MMU, LG2XX_ICMD32_SOP_MMU_UPG, i),

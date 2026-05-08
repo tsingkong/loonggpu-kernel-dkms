@@ -253,6 +253,24 @@ static int loonggpu_info_ioctl(struct drm_device *dev, void *data, struct drm_fi
 			ib_start_alignment = 32;
 			ib_size_alignment = 8;
 			break;
+		case LOONGGPU_HW_IP_BPIPE:
+			type = LOONGGPU_IP_BLOCK_TYPE_BPIPE;
+			ring_mask |= adev->bpipe.ring.ready;
+			ib_start_alignment = 32;
+			ib_size_alignment = 8;
+			break;
+		case LOONGGPU_HW_IP_EPIPE:
+			type = LOONGGPU_IP_BLOCK_TYPE_EPIPE;
+			ring_mask |= adev->epipe.ring.ready;
+			ib_start_alignment = 32;
+			ib_size_alignment = 8;
+			break;
+		case LOONGGPU_HW_IP_DPIPE:
+			type = LOONGGPU_IP_BLOCK_TYPE_DPIPE;
+			ring_mask |= adev->dpipe.ring.ready;
+			ib_start_alignment = 32;
+			ib_size_alignment = 8;
+			break;
 		case LOONGGPU_HW_IP_DMA:
 			type = LOONGGPU_IP_BLOCK_TYPE_XDMA;
 			for (i = 0; i < adev->xdma.num_instances; i++)
@@ -286,6 +304,15 @@ static int loonggpu_info_ioctl(struct drm_device *dev, void *data, struct drm_fi
 		switch (info->query_hw_ip.type) {
 		case LOONGGPU_HW_IP_GFX:
 			type = LOONGGPU_IP_BLOCK_TYPE_GFX;
+			break;
+		case LOONGGPU_HW_IP_BPIPE:
+			type = LOONGGPU_IP_BLOCK_TYPE_BPIPE;
+			break;
+		case LOONGGPU_HW_IP_EPIPE:
+			type = LOONGGPU_IP_BLOCK_TYPE_EPIPE;
+			break;
+		case LOONGGPU_HW_IP_DPIPE:
+			type = LOONGGPU_IP_BLOCK_TYPE_DPIPE;
 			break;
 		case LOONGGPU_HW_IP_DMA:
 			type = LOONGGPU_IP_BLOCK_TYPE_XDMA;

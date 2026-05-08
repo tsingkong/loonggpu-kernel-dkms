@@ -302,6 +302,38 @@ static bool parse_vbios_lcd_ctrl(struct vbios_desc *vb_desc, struct loonggpu_vbi
 	return ret;
 }
 
+static bool parse_vbios_scale(struct vbios_desc *vb_desc, struct loonggpu_vbios *vbios)
+{
+	bool ret = false;
+	u8 *data;
+
+	if (IS_ERR_OR_NULL(vb_desc) || IS_ERR_OR_NULL(vbios))
+		return ret;
+
+	data = (u8 *)vbios->vbios_ptr + vb_desc->offset;
+
+	if (vbios->funcs && vbios->funcs->create_scale_resource)
+		ret = vbios->funcs->create_scale_resource(vbios, data, vb_desc->link, vb_desc->size);
+
+	return ret;
+}
+
+static bool parse_vbios_dpm_config(struct vbios_desc *vb_desc, struct loonggpu_vbios *vbios)
+{
+	bool ret = false;
+	u8 *data;
+
+	if (IS_ERR_OR_NULL(vb_desc) || IS_ERR_OR_NULL(vbios))
+		return ret;
+
+	data = (u8 *)vbios->vbios_ptr + vb_desc->offset;
+
+	if (vbios->funcs && vbios->funcs->create_dpm_config_resource)
+		ret = vbios->funcs->create_dpm_config_resource(vbios, data, vb_desc->link, vb_desc->size);
+
+	return ret;
+}
+
 static bool parse_vbios_default(struct vbios_desc *vb_desc, struct loonggpu_vbios *vbios)
 {
 	DRM_ERROR("Current descriptor[T-%d][V-%d] cannot be interprete.\n",
@@ -326,6 +358,8 @@ static struct desc_func tables[] = {
 	FUNC(desc_panel, ver_v1, parse_vbios_panel),
 	FUNC(desc_res_encoder, ver_v1, parse_vbios_ext_encoder),
 	FUNC(desc_lcd_ctrl, ver_v1, parse_vbios_lcd_ctrl),
+	FUNC(desc_scale, ver_v1, parse_vbios_scale),
+	FUNC(desc_scale, ver_v1, parse_vbios_dpm_config),
 };
 
 static inline parse_func *get_parse_func(struct vbios_desc *desc)
@@ -608,6 +642,8 @@ static bool vbios_create_connector_resource(struct loonggpu_vbios *vbios, void *
 	connector->irq_gpio = vb_connector.irq_gpio;
 	connector->gpio_placement = vb_connector.gpio_placement;
 	memcpy(connector->internal_edid, vb_connector.internal_edid, 256);
+	if (connector->feature >= 1)
+		connector->multi_interface = vb_connector.multi_interface;
 
 	list_add_tail(&connector->base.node, &vbios->resource_list);
 
@@ -783,6 +819,63 @@ static bool vbios_create_panel_resource(struct loonggpu_vbios *vbios, void *data
 	}
 
 	list_add_tail(&panel_resource->base.node, &vbios->resource_list);
+
+	return true;
+}
+
+static bool vbios_create_scale_resource(struct loonggpu_vbios *vbios, void *data, u32 link, u32 size)
+{
+	struct scale_resource *scale_resource;
+	struct vbios_scale vb_scale;
+	u32 scale_size;
+
+	if (IS_ERR_OR_NULL(vbios) || IS_ERR_OR_NULL(data))
+		return false;
+
+	scale_resource = kvmalloc(sizeof(*scale_resource), GFP_KERNEL);
+	if (IS_ERR_OR_NULL(scale_resource))
+		return false;
+
+	scale_size = sizeof(struct vbios_scale);
+	memset(&vb_scale, VBIOS_DATA_INVAL, scale_size);
+	memcpy(&vb_scale, data, min(size, scale_size));
+
+	scale_resource->base.link = link;
+	scale_resource->base.type = LOONGGPU_RESOURCE_SCALE;
+
+	scale_resource->feature = vb_scale.feature;
+	scale_resource->enable = vb_scale.enable;
+
+	list_add_tail(&scale_resource->base.node, &vbios->resource_list);
+
+	return true;
+}
+
+static bool vbios_create_dpm_config_resource(struct loonggpu_vbios *vbios, void *data, u32 link, u32 size)
+{
+	struct dpm_config_resource *dpm_config_resource;
+	struct vbios_dpm_config vb_dpm_config;
+	u32 dpm_config_size;
+
+	if (IS_ERR_OR_NULL(vbios) || IS_ERR_OR_NULL(data))
+		return false;
+
+	dpm_config_resource = kvmalloc(sizeof(*dpm_config_resource), GFP_KERNEL);
+	if (IS_ERR_OR_NULL(dpm_config_resource))
+		return false;
+
+	dpm_config_size = sizeof(struct vbios_dpm_config);
+	memset(&vb_dpm_config, VBIOS_DATA_INVAL, dpm_config_size);
+	memcpy(&vb_dpm_config, data, min(size, dpm_config_size));
+
+	dpm_config_resource->base.link = link;
+	dpm_config_resource->base.type = LOONGGPU_RESOURCE_DPM_CONFIG;
+
+	dpm_config_resource->feature = vb_dpm_config.feature;
+	dpm_config_resource->enable = vb_dpm_config.enable;
+	dpm_config_resource->sclk_table = vb_dpm_config.sclk_table;
+
+	list_add_tail(&dpm_config_resource->base.node, &vbios->resource_list);
 
 	return true;
 }
@@ -1043,6 +1136,48 @@ static struct panel_resource *vbios_get_panel_resource(struct loonggpu_vbios *vb
 	return NULL;
 }
 
+static struct scale_resource *vbios_get_scale_resource(struct loonggpu_vbios *vbios, u32 link)
+{
+	struct resource_object *entry;
+	struct scale_resource *scale_resource;
+
+	if (IS_ERR_OR_NULL(vbios))
+		return NULL;
+
+	if (list_empty(&vbios->resource_list))
+		return NULL;
+
+	list_for_each_entry (entry, &vbios->resource_list, node) {
+		if ((entry->link == link) && (entry->type == LOONGGPU_RESOURCE_SCALE)) {
+			scale_resource = container_of(entry, struct scale_resource, base);
+			return scale_resource;
+		}
+	}
+
+	return NULL;
+}
+
+static struct dpm_config_resource *vbios_get_dpm_config_resource(struct loonggpu_vbios *vbios, u32 link)
+{
+	struct resource_object *entry;
+	struct dpm_config_resource *dpm_config_resource;
+
+	if (IS_ERR_OR_NULL(vbios))
+		return NULL;
+
+	if (list_empty(&vbios->resource_list))
+		return NULL;
+
+	list_for_each_entry (entry, &vbios->resource_list, node) {
+		if ((entry->link == link) && (entry->type == LOONGGPU_RESOURCE_DPM_CONFIG)) {
+			dpm_config_resource = container_of(entry, struct dpm_config_resource, base);
+			return dpm_config_resource;
+		}
+	}
+
+	return NULL;
+}
+
 static struct lcd_ctrl_resource *vbios_get_lcd_ctrl_resource(struct loonggpu_vbios *vbios, u32 link)
 {
 	struct resource_object *entry;
@@ -1080,6 +1215,8 @@ static struct vbios_funcs vbios_funcs = {
 	.create_backlight_resource = vbios_create_backlight,
 	.create_panel_resource = vbios_create_panel_resource,
 	.create_lcd_ctrl_resource = vbios_create_lcd_ctrl_resource,
+	.create_scale_resource = vbios_create_scale_resource,
+	.create_dpm_config_resource = vbios_create_dpm_config_resource,
 
 	.get_header_resource = vbios_get_header_resource,
 	.get_crtc_resource = vbios_get_crtc_resource,
@@ -1093,6 +1230,8 @@ static struct vbios_funcs vbios_funcs = {
 	.get_backlight_resource = vbios_get_backlight_resource,
 	.get_panel_resource = vbios_get_panel_resource,
 	.get_lcd_ctrl_resource = vbios_get_lcd_ctrl_resource,
+	.get_scale_resouce = vbios_get_scale_resource,
+	.get_dpm_config_resouce = vbios_get_dpm_config_resource,
 };
 
 u8 loonggpu_vbios_checksum(const u8 *data, int size)
@@ -1179,6 +1318,14 @@ void *dc_get_vbios_resource(struct loonggpu_vbios *vbios, u32 link,
 	case LOONGGPU_RESOURCE_PANEL:
 		if (vbios->funcs->get_panel_resource)
 			return (void *)vbios->funcs->get_panel_resource(vbios, link);
+		break;
+	case LOONGGPU_RESOURCE_SCALE:
+		if (vbios->funcs->get_scale_resouce)
+			return (void *)vbios->funcs->get_scale_resouce(vbios, link);
+		break;
+	case LOONGGPU_RESOURCE_DPM_CONFIG:
+		if (vbios->funcs->get_dpm_config_resouce)
+			return (void *)vbios->funcs->get_dpm_config_resouce(vbios, link);
 		break;
 	case LOONGGPU_RESOURCE_LCD_CTRL:
 		if (vbios->funcs->get_lcd_ctrl_resource)

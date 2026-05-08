@@ -93,6 +93,7 @@ extern int loonggpu_panel_cfg_clk_pol;
 extern int loonggpu_panel_cfg_de_pol;
 extern int loonggpu_gpu_uart;
 extern int loonggpu_ls7a2000_mode_limit;
+extern int loonggpu_ls7a2000_mode_limit_soft;
 
 #ifdef CONFIG_VDD_LOONGSON
 extern bool no_system_mem_limit;
@@ -154,6 +155,9 @@ enum loonggpu_chip {
 
 enum loonggpu_cp_irq {
 	LOONGGPU_CP_IRQ_GFX_EOP = 0,
+	LOONGGPU_CP_IRQ_BPIPE_EOP,
+	LOONGGPU_CP_IRQ_DPIPE_EOP,
+	LOONGGPU_CP_IRQ_EPIPE_EOP,
 	LOONGGPU_CP_IRQ_LAST
 };
 
@@ -427,9 +431,6 @@ void loonggpu_fence_slab_fini(void);
 #define LOONGGPU_RESERVE_START_OFFSET		0x54
 #define LOONGGPU_RESERVE_END_OFFSET		0x74
 
-#define LOONGGPU_LG2XX_IP_STATE			0x44
-#define LOONGGPU_LG2XX_DPM_STATE		0xe8
-
 #define LOONGGPU_FW_VERSION_OFFSET			0x78
 #define LOONGGPU_HW_FEATURE_OFFSET			0x7c
 
@@ -532,7 +533,14 @@ void loonggpu_fence_slab_fini(void);
 #define LOONGGPU_LG2XX_BPIPE_CB_RPTR_OFFSET		0x34
 #define LOONGGPU_LG2XX_CPIPE_CB_WPTR_OFFSET		0x38
 #define LOONGGPU_LG2XX_CPIPE_CB_RPTR_OFFSET		0x3c
-#define LOONGGPU_LG2XX_FW_VERSION_OFFSET			0x40
+#define LOONGGPU_LG2XX_FW_VERSION_OFFSET		0x40
+#define LOONGGPU_LG2XX_IP_STATE				0x44
+#define LOONGGPU_LG2XX_DPIPE_CB_WPTR_OFFSET         	0x48
+#define LOONGGPU_LG2XX_DPIPE_CB_RPTR_OFFSET         	0x4c
+#define LOONGGPU_LG2XX_EPIPE_CB_WPTR_OFFSET         	0x50
+#define LOONGGPU_LG2XX_EPIPE_CB_RPTR_OFFSET         	0x54
+#define LOONGGPU_LG2XX_DPM_STATE			0xe8
+
 #define LOONGGPU_LG2XX_TIME_COUNT_LO			0x90
 #define LOONGGPU_LG2XX_TIME_COUNT_HI			0x94
 
@@ -590,6 +598,14 @@ void loonggpu_fence_slab_fini(void);
 #define LG2XX_ICMD32_MOP_CWSR	0x0000000b
 	#define LG2XX_ICMD32_SOP_CWSR_ZEN	0x00000001
 	#define LG2XX_ICMD32_SOP_CWSR_ZDIS	0x00000002
+#define LG2XX_ICMD32_MOP_DPIPE         0x0000000c
+	#define LG2XX_ICMD32_SOP_DPIPE_BBQ      0x00000001
+	#define LG2XX_ICMD32_SOP_DPIPE_BQSZ     0x00000002
+	#define LG2XX_ICMD32_SOP_DPIPE_UBBQ     0x00000003
+#define LG2XX_ICMD32_MOP_EPIPE         0x0000000d
+	#define LG2XX_ICMD32_SOP_EPIPE_BBQ      0x00000001
+	#define LG2XX_ICMD32_SOP_EPIPE_BQSZ     0x00000002
+	#define LG2XX_ICMD32_SOP_EPIPE_UBBQ     0x00000003
 
 /* Stream command mode */
 #define LG2XX_SCMD32(op, cfg)				(((op) & 0xFF)  | ((cfg) & 0xFFFFFF) << 8)
@@ -619,14 +635,19 @@ void loonggpu_fence_slab_fini(void);
 #define LG2XX_INT_CFG0_SIZE_256		(0x8 << 4)
 #define LG2XX_INT_CFG0_SIZE_1024	(0xa << 4)
 #define LG2XX_INT_CFG0_SIZE_2048	(0xb << 4)
+#define LG210_INT_CFG0_SIZE_1024	(0x9 << 4)
+#define LG210_INT_CFG0_SIZE_2048	(0xa << 4)
 #define LG2XX_INT_CFG0_ENABLE		(0x1 << 0)
 #define LG2XX_INT_CFG0_DISABLE		(0x0 << 0)
 #define LG2XX_INT_CFG0_UMAP		(0x1 << 8)
 #define LG2XX_INT_CFG0_MAP		(0x0 << 8)
 #define LG2XX_INT_CFG0_VMID		(0x0 << 9)
 
-#define LG2XX_DPM_STATE_READY		(0x80000000)
+/* SC/EC/132_REG */
 #define LG2XX_EC132_OFFSET		(0x100000)
+#define LG2XX_SC132_DOORBELL_REG	(0x8)
+
+#define LG2XX_DPM_STATE_READY		(0x80000000)
 /*
  * IRQS.
  */
@@ -909,6 +930,22 @@ struct loonggpu_gfx_funcs {
 struct sq_work {
 	struct work_struct	work;
 	unsigned ih_data;
+};
+
+struct loonggpu_bpipe {
+	struct loonggpu_ring ring;
+	struct loonggpu_irq_src eop_irq;
+	struct drm_sched_entity entity;
+};
+
+struct loonggpu_dpipe {
+	struct loonggpu_ring ring;
+	struct loonggpu_irq_src eop_irq;
+};
+
+struct loonggpu_epipe {
+	struct loonggpu_ring ring;
+	struct loonggpu_irq_src eop_irq;
 };
 
 struct loonggpu_gfx {
@@ -1402,6 +1439,15 @@ struct loonggpu_device {
 	/* gfx */
 	struct loonggpu_gfx		gfx;
 
+	/* bpipe */
+	struct loonggpu_bpipe 		bpipe;
+
+	/* dpipe */
+	struct loonggpu_dpipe 		dpipe;
+
+	/* epipe */
+	struct loonggpu_epipe 		epipe;
+
 	/* xdma */
 	struct loonggpu_xdma		xdma;
 
@@ -1600,8 +1646,11 @@ loonggpu_get_xdma_instance(struct loonggpu_ring *ring)
 #define loonggpu_ring_parse_cs(r, p, ib) ((r)->funcs->parse_cs((p), (ib)))
 #define loonggpu_ring_patch_cs_in_place(r, p, ib) ((r)->funcs->patch_cs_in_place((p), (ib)))
 #define loonggpu_ring_test_ring(r) ((r)->funcs->test_ring((r)))
+#define loonggpu_ring_test_cs(r, t) ((r)->funcs->test_cs((r), (t)))
+#define loonggpu_ring_test_tl_ib(r, t) ((r)->funcs->test_tl_ib((r), (t)))
 #define loonggpu_ring_test_ib(r, t) ((r)->funcs->test_ib((r), (t)))
 #define loonggpu_ring_test_xdma(r, t) ((r)->funcs->test_xdma((r), (t)))
+#define loonggpu_ring_test_bpipe(r, t) ((r)->funcs->test_bpipe((r), (t)))
 #define loonggpu_ring_get_rptr(r) ((r)->funcs->get_rptr((r)))
 #define loonggpu_ring_get_wptr(r) ((r)->funcs->get_wptr((r)))
 #define loonggpu_ring_set_wptr(r) ((r)->funcs->set_wptr((r)))

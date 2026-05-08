@@ -47,10 +47,12 @@ static uint16_t lg2xx_ih_get_hw_int_flags(struct loonggpu_device *adev)
 		flags |= LG2XX_INT_CFG0_SIZE_256;
 		break;
 	case 1024:
-		flags |= LG2XX_INT_CFG0_SIZE_1024;
+		flags |= (adev->family_type != CHIP_LG210)? LG2XX_INT_CFG0_SIZE_1024 :
+			LG210_INT_CFG0_SIZE_1024;
 		break;
 	case 2048:
-		flags |= LG2XX_INT_CFG0_SIZE_2048;
+		flags |= (adev->family_type != CHIP_LG210)? LG2XX_INT_CFG0_SIZE_2048 :
+			LG210_INT_CFG0_SIZE_2048;
 		break;
 	default:
 		DRM_ERROR("%s Illegal rb_bufsz  %d\n", __FUNCTION__, rb_bufsz);
@@ -493,6 +495,7 @@ int loonggpu_ih_ring_init(struct loonggpu_device *adev, unsigned ring_size,
 	adev->irq.ih.ptr_mask = adev->irq.ih.ring_size / 4 - 1;
 	adev->irq.ih.rptr = 0;
 	adev->irq.ih.use_bus_addr = use_bus_addr;
+	init_waitqueue_head(&adev->irq.ih.wait_process);
 
 	if (adev->irq.ih.use_bus_addr) {
 		if (!adev->irq.ih.ring) {
@@ -550,6 +553,31 @@ void loonggpu_ih_ring_fini(struct loonggpu_device *adev)
 		loonggpu_device_wb_free(adev, adev->irq.ih.wptr_offs);
 		loonggpu_device_wb_free(adev, adev->irq.ih.rptr_offs);
 	}
+}
+
+/**
+ * loonggpu_ih_wait_on_checkpoint_process_ts - wait to process IVs up to checkpoint
+ *
+ * @adev: loonggpu_device pointer
+ * @ih: ih ring to process
+ *
+ * Used to ensure ring has processed IVs up to the checkpoint write pointer.
+ */
+int loonggpu_ih_wait_on_checkpoint_process_ts(struct loonggpu_device *adev,
+					struct loonggpu_ih_ring *ih)
+{
+	uint32_t checkpoint_wptr;
+	long timeout = HZ;
+
+	if (!ih->enabled || adev->shutdown)
+		return -ENODEV;
+
+	checkpoint_wptr = loonggpu_ih_get_wptr(adev);
+	/* Order wptr with ring data. */
+	rmb();
+
+	return wait_event_interruptible_timeout(ih->wait_process,
+		    ih->rptr == loonggpu_ih_get_wptr(adev), timeout);
 }
 
 /**
@@ -611,6 +639,8 @@ restart_ih:
 	}
 	loonggpu_ih_set_rptr(adev);
 	atomic_set(&adev->irq.ih.lock, 0);
+
+	wake_up_all(&adev->irq.ih.wait_process);
 
 	/* make sure wptr hasn't changed while processing */
 	wptr = loonggpu_ih_get_wptr(adev);

@@ -100,6 +100,7 @@ struct vbios_connector {
 	enum vbios_edid_method edid_method;
 	u32 irq_gpio;
 	enum gpio_placement gpio_placement;
+	bool multi_interface;  /* feature = 1  */
 } __packed;
 
 struct vbios_crtc {
@@ -164,6 +165,17 @@ struct vbios_lcd_ctrl {
 	u32 gpio_ctrl_en;
 } __packed;
 
+struct vbios_scale {
+	u32 feature;
+	bool enable;
+} __packed;
+
+struct vbios_dpm_config {
+	u32 feature;
+	bool enable;
+	struct loonggpu_dvfs_single_table sclk_table;
+} __packed;
+
 struct loonggpu_vbios;
 
 struct vbios_funcs {
@@ -182,6 +194,8 @@ struct vbios_funcs {
 	bool (*create_backlight_resource)(struct loonggpu_vbios *vbios, void *data, u32 link, u32 size);
 	bool (*create_panel_resource)(struct loonggpu_vbios *vbios, void *data, u32 link, u32 size);
 	bool (*create_lcd_ctrl_resource)(struct loonggpu_vbios *vbios, void *data, u32 link, u32 size);
+	bool (*create_scale_resource)(struct loonggpu_vbios *vbios, void *data, u32 link, u32 size);
+	bool (*create_dpm_config_resource)(struct loonggpu_vbios *vbios, void *data, u32 link, u32 size);
 
 	struct header_resource *(*get_header_resource)(struct loonggpu_vbios *vbios);
 	struct i2c_resource *(*get_i2c_resource)(struct loonggpu_vbios *vbios, u32 link);
@@ -194,6 +208,8 @@ struct vbios_funcs {
 	struct ext_encoder_resources *(*get_ext_encoder_resource)(struct loonggpu_vbios *vbios, u32 link);
 	struct backlight_resource *(*get_backlight_resource)(struct loonggpu_vbios *vbios, u32 link);
 	struct panel_resource *(*get_panel_resource)(struct loonggpu_vbios *vbios, u32 link);
+	struct scale_resource *(*get_scale_resouce)(struct loonggpu_vbios *vbios, u32 link);
+	struct dpm_config_resource *(*get_dpm_config_resouce)(struct loonggpu_vbios *vbios, u32 link);
 	struct lcd_ctrl_resource *(*get_lcd_ctrl_resource)(struct loonggpu_vbios *vbios, u32 link);
 };
 
@@ -220,6 +236,8 @@ enum desc_type {
 	desc_gpu,
 	desc_panel,
 	desc_lcd_ctrl,
+	desc_scale,
+	desc_dpm_config,
 	desc_max = 0xffff
 };
 

@@ -57,6 +57,7 @@ int loonggpu_panel_cfg_clk_pol = -1;
 int loonggpu_panel_cfg_de_pol = -1;
 int loonggpu_gpu_uart = 0;
 int loonggpu_ls7a2000_mode_limit = 0;
+int loonggpu_ls7a2000_mode_limit_soft = 0;
 
 /**
  * DOC: panel_cfg_clk_pol (int)
@@ -362,6 +363,9 @@ module_param_named(gpu_uart, loonggpu_gpu_uart, int, 0644);
 MODULE_PARM_DESC(ls7a2000_mode_limit, "Mode limit (0 = disabled (default), 1 = enabled)");
 module_param_named(ls7a2000_mode_limit, loonggpu_ls7a2000_mode_limit, int, 0644);
 
+MODULE_PARM_DESC(ls7a2000_mode_limit_soft, "Mode limit (0 = disabled (default), 1 = enabled)");
+module_param_named(ls7a2000_mode_limit_soft, loonggpu_ls7a2000_mode_limit_soft, int, 0644);
+
 static const struct pci_device_id pciidlist[] = {
 	{0x0014, 0x7A25, PCI_ANY_ID, PCI_ANY_ID, 0, 0, CHIP_LG100},
 	{0x0014, 0x7A35, PCI_ANY_ID, PCI_ANY_ID, 0, 0, CHIP_LG200},
@@ -594,6 +598,7 @@ static int loongson_vga_pci_register(struct pci_dev *pdev,
 	int ret;
 	u32 crtc_cfg;
 	u32 i;
+	u32 hsync_val, vsync_val, crtc_pan;
 	resource_size_t dc_rmmio_base;
 	resource_size_t dc_rmmio_size;
 	void __iomem *dc_rmmio;
@@ -637,10 +642,29 @@ static int loongson_vga_pci_register(struct pci_dev *pdev,
 		dc_rmmio_size = pci_resource_len(pdev, 0);
 		dc_rmmio = pci_iomap(pdev, 0, dc_rmmio_size);
 
-		for (i = 0; i < 2; i++) {
-			crtc_cfg = readl(dc_rmmio + gdc_reg->crtc_reg[i].cfg);
-			crtc_cfg &= ~CRTC_CFG_ENABLE;
-			writel(crtc_cfg, dc_rmmio + gdc_reg->crtc_reg[i].cfg);
+		if (pdev->device == 0x7a46) {
+			for (i = 0; i < 2; i++) {
+				crtc_pan = readl(dc_rmmio + gdc_reg->crtc_reg[i].panelcfg);
+				hsync_val = readl(dc_rmmio + gdc_reg->crtc_reg[i].hsync);
+				vsync_val = readl(dc_rmmio + gdc_reg->crtc_reg[i].vsync);
+				crtc_cfg = readl(dc_rmmio + gdc_reg->crtc_reg[i].cfg);
+				crtc_cfg &= ~CRTC_CFG_ENABLE;
+				crtc_pan &= ~CRTC_PANCFG_DE;
+				crtc_pan &= ~CRTC_PANCFG_CLKEN;
+				hsync_val &= ~CRTC_HSYNC_POLSE;
+				vsync_val &= ~CRTC_VSYNC_POLSE;
+
+				writel(crtc_pan, dc_rmmio + gdc_reg->crtc_reg[i].panelcfg);
+				writel(hsync_val, dc_rmmio + gdc_reg->crtc_reg[i].hsync);
+				writel(vsync_val, dc_rmmio + gdc_reg->crtc_reg[i].vsync);
+				writel(crtc_cfg, dc_rmmio + gdc_reg->crtc_reg[i].cfg);
+			}
+		} else {
+			for (i = 0; i < 2; i++) {
+				crtc_cfg = readl(dc_rmmio + gdc_reg->crtc_reg[i].cfg);
+				crtc_cfg &= ~CRTC_CFG_ENABLE;
+				writel(crtc_cfg, dc_rmmio + gdc_reg->crtc_reg[i].cfg);
+			}
 		}
 	}
 

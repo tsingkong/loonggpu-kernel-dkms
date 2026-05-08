@@ -7,6 +7,7 @@
 #include "loonggpu_mmu.h"
 #include "loonggpu_zip.h"
 #include "loonggpu_gfx.h"
+#include "loonggpu_pipe.h"
 #include "loonggpu_xdma.h"
 #include "loonggpu_dc_reg.h"
 #include "loonggpu_doorbell.h"
@@ -254,8 +255,10 @@ int loonggpu_set_ip_blocks(struct loonggpu_device *adev)
 		loonggpu_device_ip_block_add(adev, &dc_ip_block);
 		loonggpu_device_ip_block_add(adev, &gfx_ip_block);
 		loonggpu_device_ip_block_add(adev, &xdma_ip_block);
-		if (adev->family_type >= CHIP_LG200)
+		if (adev->family_type >= CHIP_LG200) {
+			loonggpu_device_ip_block_add(adev, &bpipe_ip_block);
 			loonggpu_device_ip_block_add(adev, &dvfs_ip_block_v1_0_0);
+		}
 		break;
 	case CHIP_LG210:
 		loonggpu_device_ip_block_add(adev, &loonggpu_common_ip_block);
@@ -265,6 +268,9 @@ int loonggpu_set_ip_blocks(struct loonggpu_device *adev)
 		loonggpu_device_ip_block_add(adev, &dc_ip_block);
 		loonggpu_device_ip_block_add(adev, &gfx_ip_block);
 		loonggpu_device_ip_block_add(adev, &xdma_ip_block);
+		loonggpu_device_ip_block_add(adev, &bpipe_ip_block);
+		loonggpu_device_ip_block_add(adev, &dpipe_ip_block);
+		loonggpu_device_ip_block_add(adev, &epipe_ip_block);
 		break;
 	default:
 		/* FIXME: not supported yet */

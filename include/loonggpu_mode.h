@@ -41,6 +41,12 @@ enum loonggpu_flip_status {
 	LOONGGPU_FLIP_SUBMITTED
 };
 
+enum loonggpu_flip_copy_status {
+	LOONGGPU_FLIP_COPY_UNKNOWN,
+	LOONGGPU_FLIP_COPY_NONE,
+	LOONGGPU_FLIP_COPY_DONE
+};
+
 struct loonggpu_display_funcs {
 	/* get frame count */
 	u32 (*vblank_get_counter)(struct loonggpu_device *adev, int crtc);
@@ -96,6 +102,11 @@ struct loonggpu_crtc {
 	u32 lb_vblank_lead_lines;
 	struct drm_display_mode hw_mode;
 	struct drm_pending_vblank_event *event;
+
+	struct work_struct disp_work;
+	int disp_work_status;
+	int disp_scale;
+	int pflip_copy;
 };
 
 struct loonggpu_plane {

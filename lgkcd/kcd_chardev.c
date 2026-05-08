@@ -833,7 +833,7 @@ static int kcd_ioctl_alloc_memory_of_gpu(struct file *filep,
 			err = -EINVAL;
 			goto err_unlock;
 		}
-		if (dev->kcd->has_doorbells) {
+		if (!dev->kcd->has_doorbells) {
 			err = -EINVAL;
 			goto err_unlock;
 		}
@@ -842,6 +842,9 @@ static int kcd_ioctl_alloc_memory_of_gpu(struct file *filep,
 			err = -ENOMEM;
 			goto err_unlock;
 		}
+
+		offset &= dev->adev->doorbell.size - 1;
+		offset |= dev->adev->gmc.vram_start;
 	}
 
 	err = loonggpu_lgkcd_gpuvm_alloc_memory_of_gpu(

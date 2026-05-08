@@ -136,6 +136,15 @@ struct dc_hw_ops {
 	bool (*interface_status_changed)(struct drm_connector *connector, struct loonggpu_dc_crtc *crtc);
 };
 
+struct display_bo {
+	u32 pitch;
+	u32 cpp;
+	u64 gpu_addr;
+	u64 *cpu_ptr;
+	struct loonggpu_bo *handle;
+	unsigned int size;
+};
+
 struct loonggpu_dc {
 	struct drm_device *ddev;
 	struct loonggpu_device *adev;
@@ -143,6 +152,11 @@ struct loonggpu_dc {
 	struct list_head crtc_list;
 	struct list_head encoder_list;
 	struct loonggpu_link_info *link_info;
+
+	struct drm_display_mode native_mode;
+	struct display_bo disp_bo[2];
+	struct display_bo *scanout_bo;
+	u32 scanout_id;
 
 	/* base information */
 	int chip;
@@ -175,6 +189,10 @@ void dc_writel(struct loonggpu_device *adev, u32 reg, u32 val);
 void dc_writel_check(struct loonggpu_device *adev, u32 reg, u32 val);
 u32 dc_readl_locked(struct loonggpu_device *adev, u32 reg);
 void dc_writel_locked(struct loonggpu_device *adev, u32 reg, u32 val);
+
+struct display_bo *loonggpu_dc_get_disp_bo(struct loonggpu_device *adev);
+int loonggpu_dc_scale_init(struct loonggpu_device *adev);
+int loonggpu_dc_scale_fini(struct loonggpu_device *adev);
 
 bool dc_submit_timing_update(struct loonggpu_dc *dc, u32 link, struct dc_timing_info *timing);
 void handle_cursor_update(struct drm_plane *plane,

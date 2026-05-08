@@ -128,66 +128,27 @@ static unsigned int aux_transfer(struct loonggpu_device *adev,
 				unsigned int pkt_size,
 				unsigned char *data)
 {
-	unsigned int val32, count;
-	unsigned char i, j;
+	aux_msg_t aux_data;
+	unsigned int j = 0;
+	int ret = 0;
 
-	dc_writel(adev, gdc_reg->dp_reg[intf].aux_channel1, 0x50);
-	dc_writel(adev, gdc_reg->dp_reg[intf].aux_channel2, (pkt_size - 1) & 0xfffff);
-
-	val32 = dc_readl(adev, gdc_reg->dp_reg[intf].aux_channel0);
-	val32 |= (0x1 << 2);
-	dc_writel(adev, gdc_reg->dp_reg[intf].aux_channel0, val32);
-
-	udelay(10000);
-
-	count = 20;
-	for (i = 0; i < count; i++) {
-		val32 =	dc_readl(adev, gdc_reg->dp_reg[intf].aux_monitor0);
-		if (val32 & 0x2) {
-			DRM_DEBUG_DRIVER("dp transaction success!\n");
-			for (j = 0; j < pkt_size; j++) {
-				DRM_DEBUG_DRIVER("aux data read: [aux base: 0x%x]: 0x%x\n", gdc_reg->dp_reg[intf].aux_monitor1 + j,
-							readb(adev->loongson_dc_rmmio + gdc_reg->dp_reg[intf].aux_monitor1 + j));
-				data[j] = readb(adev->loongson_dc_rmmio + gdc_reg->dp_reg[intf].aux_monitor1 + j);
-			}
-			return 0;
-		} else if (val32 & 0x1) {
-			/*
-			 * 1.i2c deffer, wait....
-			 *
-			 * 2. After stress test for reading edid on several boards
-			 * (for dp, edp and edp to hdmi cases),
-			 * only once case of aux_monitor7 & 0xf00 == 0 is found when reading
-			 * edid error. Once the case occured, one more aux_transfer call
-			 * will be ok. So, return 2 to indicate more aux_transfer call.
-			 * */
-			if ((dc_readl(adev, gdc_reg->dp_reg[intf].aux_monitor5) & 0x80) ||
-				((dc_readl(adev, gdc_reg->dp_reg[intf].aux_monitor7) & 0xf00) == 0)){
-				udelay(100000);
-				return 2;
-			} else {
-				DRM_DEBUG_DRIVER("aux monitor 5 date:0x%x\n", dc_readl(adev, gdc_reg->dp_reg[intf].aux_monitor5));
-				DRM_DEBUG_DRIVER("aux monitor 6 date:0x%x\n", dc_readl(adev, gdc_reg->dp_reg[intf].aux_monitor6));
-				DRM_DEBUG_DRIVER("aux monitor 7 date:0x%x\n", dc_readl(adev, gdc_reg->dp_reg[intf].aux_monitor7));
-				DRM_DEBUG_DRIVER("dp transaction fail!\n");
-				return 1;
-			}
+	aux_data.addr = 0x50;
+	aux_data.size = pkt_size;
+	aux_data.data_low = 0;
+	aux_data.data_high = 0;
+	ret = aux_config(adev, READ, aux_data, intf);
+	if (ret == 0) {
+		for (j = 0; j < pkt_size; j++) {
+			DRM_DEBUG_DRIVER("aux data read: [aux base: 0x%x]: 0x%x\n", gdc_reg->dp_reg[intf].aux_monitor1 + j,
+						readb(adev->loongson_dc_rmmio + gdc_reg->dp_reg[intf].aux_monitor1 + j));
+			data[j] = readb(adev->loongson_dc_rmmio + gdc_reg->dp_reg[intf].aux_monitor1 + j);
 		}
-		udelay(10000);
+	} else {
+		DRM_ERROR("f:%s error ret:%d addr: 0x50 size:%d\r\n", __func__, ret, pkt_size);
 	}
 
-	/* todo can't run here. */
-	if (i == count) {
-		DRM_DEBUG_DRIVER("NOTE: aux read nothing, because monitor 0 val is 0\n");
-		DRM_DEBUG_DRIVER("aux monitor 5 date:0x%x\n", dc_readl(adev, gdc_reg->dp_reg[intf].aux_monitor5));
-		DRM_DEBUG_DRIVER("aux monitor 6 date:0x%x\n", dc_readl(adev, gdc_reg->dp_reg[intf].aux_monitor6));
-		DRM_DEBUG_DRIVER("aux monitor 7 date:0x%x\n", dc_readl(adev, gdc_reg->dp_reg[intf].aux_monitor7));
-		return 1;
-	}
-
-	return 0;
+	return ret;
 }
-
 
 static bool drm_edid_block_checksum(const unsigned char *edid)
 {
@@ -490,14 +451,20 @@ static unsigned int process_display_interfaces(struct loonggpu_device *adev, int
                                               struct loonggpu_bridge_phy *phy)
 {
 	struct edid *hdmi_edid = NULL, *dp_edid = NULL;
+	struct loonggpu_connector *aconnector = NULL;
 	struct drm_connector *dp_connector = NULL;
 	unsigned char valid_edid[256];
 	unsigned long count = 0;
+
 
 	/* Process HDMI interface */
 	if (dc_crtc->intf[0].type == INTERFACE_HDMI && dc_crtc->intf[0].connected) {
 		hdmi_edid = drm_get_edid(connector, &phy->li2c->adapter);
 		if (hdmi_edid) {
+			aconnector = to_loonggpu_connector(connector);
+			if (is_hpn_special_display(hdmi_edid) || is_eat_special_display(hdmi_edid))
+				aconnector->special_display = true;
+
 			drm_connector_update_edid_property(connector, hdmi_edid);
 			check_hdmi_audio(adev, connector, hdmi_edid);
 			count = drm_add_edid_modes(connector, hdmi_edid);
@@ -507,12 +474,14 @@ static unsigned int process_display_interfaces(struct loonggpu_device *adev, int
 
 	/* Process DisplayPort interface */
 	if (dc_crtc->intf[1].type == INTERFACE_DP && dc_crtc->intf[1].connected) {
+		dp_aux_lock(adev, index, true);
 		if (read_edid_form_aux(adev, index, valid_edid)) {
 			dp_connector = create_virtual_connector(adev->ddev);
 			if (!IS_ERR(dp_connector)) {
 				dp_edid = process_dp_edid(dp_connector, valid_edid);
 			}
 		}
+		dp_aux_lock(adev, index, false);
 	}
 
 	/* Combine results from both interfaces */
@@ -542,15 +511,22 @@ static unsigned int ls2k3000_dc_read_edid(struct loonggpu_device *adev, int inde
 {
 	struct loonggpu_dc_crtc *dc_crtc = adev->dc->link_info[index].crtc;
 	struct loonggpu_bridge_phy *phy = adev->mode_info.encoders[connector->index]->bridge;
+	struct loonggpu_connector *aconnector = NULL;
 	unsigned char valid_edid[256];
 	unsigned long mode_count = 0;
 
+	aconnector = to_loonggpu_connector(connector);
+	aconnector->special_display = false;
+
 	/* Primary display: direct AUX read */
 	if (!index) {
+		dp_aux_lock(adev, index, true);
 		if (!read_edid_form_aux(adev, index, valid_edid)) {
+			dp_aux_lock(adev, index, false);
 			DRM_ERROR("Primary AUX EDID read failed\n");
 			return 0;
 		}
+		dp_aux_lock(adev, index, false);
 		return process_edp_edid(connector, valid_edid);
 	}
 

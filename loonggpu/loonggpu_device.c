@@ -400,7 +400,7 @@ void loonggpu_device_gart_location(struct loonggpu_device *adev,
 	}
 
 	mc->gart_start = 0;
-	mc->gart_size = mc->mc_vram_size;
+	mc->gart_size = 256ULL << 20;
 
 	mc->gart_end = mc->gart_start + mc->gart_size - 1;
 	dev_info(adev->dev, "GART: %lluM 0x%016llX - 0x%016llX\n",
@@ -1432,15 +1432,15 @@ int loonggpu_device_init(struct loonggpu_device *adev,
 		adev->loongson_dc_rmmio_base = adev->rmmio_base + 0x300000; //9a1000 dc offset
 		adev->loongson_dc_rmmio_size = adev->rmmio_size - 0x300000;
 
-		adev->loongson_dc_rmmio = pci_iomap(adev->pdev, 2, adev->rmmio_size); //注意第二个参数，可能是1
+		adev->loongson_dc_rmmio = pci_iomap(adev->pdev, 2, adev->rmmio_size);
 		if (adev->loongson_dc_rmmio == NULL) {
 			return -ENOMEM;
 		}
 
 		adev->loongson_dc_rmmio += 0x300000;
-		DRM_INFO("gsgpu dc register mmio base: %#llX\n", (uint64_t)adev->loongson_dc_rmmio_base);
-		DRM_INFO("gsgpu dc rmmio: %#llX\n", (uint64_t)adev->loongson_dc_rmmio);
-		DRM_INFO("gsgpu dc register mmio size: %u\n", (unsigned)adev->loongson_dc_rmmio_size);
+		DRM_INFO("loonggpu dc register mmio base: %#llX\n", (uint64_t)adev->loongson_dc_rmmio_base);
+		DRM_INFO("loonggpu dc rmmio: %#llX\n", (uint64_t)adev->loongson_dc_rmmio);
+		DRM_INFO("loonggpu dc register mmio size: %u\n", (unsigned)adev->loongson_dc_rmmio_size);
  	}
  
 	if (adev->family_type == CHIP_LG200)
@@ -1503,6 +1503,8 @@ int loonggpu_device_init(struct loonggpu_device *adev,
 		}
 	}
 	loonggpu_fbdev_init(adev);
+
+	loonggpu_dc_scale_init(adev);
 
 	r = loonggpu_pm_sysfs_init(adev);
 	if (r)
@@ -1582,6 +1584,7 @@ void loonggpu_device_fini(struct loonggpu_device *adev)
 
 	loonggpu_ib_pool_fini(adev);
 	loonggpu_fence_driver_fini(adev);
+	loonggpu_dc_scale_fini(adev);
 	loonggpu_fbdev_fini(adev);
 	r = loonggpu_device_ip_fini(adev);
 	if (adev->firmware.gpu_info_fw) {

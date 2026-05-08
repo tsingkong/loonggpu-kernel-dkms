@@ -4,6 +4,7 @@
 #include "loonggpu_common.h"
 #include "loonggpu_cp.h"
 #include "loonggpu_irq.h"
+#include "loonggpu_pipe.h"
 
 #define GFX8_NUM_GFX_RINGS     1
 
@@ -140,6 +141,104 @@ err2:
 	dma_fence_put(f);
 err1:
 	loonggpu_device_wb_free(adev, index);
+	return r;
+}
+
+static int gfx_ring_test_tl_ib(struct loonggpu_ring *ring, long timeout)
+{
+       struct loonggpu_device *adev = ring->adev;
+       struct loonggpu_ib ib0, ib1;
+       struct dma_fence *f = NULL;
+       unsigned vmid = 0;
+       unsigned int index;
+       uint64_t gpu_addr;
+       uint32_t tmp;
+       unsigned i;
+       long r;
+
+       r = loonggpu_device_wb_get(adev, &index);
+       if (r) {
+               dev_err(adev->dev, "(%ld) failed to allocate wb slot\n", r);
+               return r;
+       }
+
+       gpu_addr = adev->wb.gpu_addr + (index * 4);
+       adev->wb.wb[index] = cpu_to_le32(0xCAFEDEAD);
+       memset(&ib0, 0, sizeof(ib0));
+       r = loonggpu_ib_get(adev, NULL, 16, &ib0);
+       if (r) {
+               DRM_ERROR("loonggpu: failed to get ib0 (%ld).\n", r);
+               goto err1;
+       }
+
+       if (adev->family_type == CHIP_LG100) 
+               ib0.ptr[0] = GSPKT(GSPKT_WRITE, 3) | WRITE_DST_SEL(1) | WRITE_WAIT;
+       else if (adev->family_type == CHIP_LG200 || adev->family_type == CHIP_LG210)
+               ib0.ptr[0] = LG2XX_SCMD32(LG2XX_SCMD32_OP_WB32, 0);
+       else
+               DRM_ERROR("%s Illegal Family type %d\n", __FUNCTION__, adev->family_type);
+
+       ib0.ptr[1] = lower_32_bits(gpu_addr);
+       ib0.ptr[2] = upper_32_bits(gpu_addr);
+       ib0.ptr[3] = 0xDEADBEEF;
+       ib0.length_dw = 4;
+
+       memset(&ib1, 0, sizeof(ib1));
+       r = loonggpu_ib_get(adev, NULL, 64, &ib1);
+       if (r) {
+               DRM_ERROR("loonggpu: failed to get ib1 (%ld).\n", r);
+               goto err1;
+       }
+
+       if (ring->adev->family_type == CHIP_LG100) {
+	       ib1.ptr[0] = GSPKT(GSPKT_NOP, 0);
+	       ib1.ptr[1] = GSPKT(GSPKT_INDIRECT, 3);
+       }
+       else if (ring->adev->family_type == CHIP_LG200 || ring->adev->family_type == CHIP_LG210) {
+	       ib1.ptr[0] = LG2XX_SCMD32(LG2XX_SCMD32_OP_VMID, 0);
+	       ib1.ptr[1] = LG2XX_SCMD32(LG2XX_SCMD32_OP_IB, 0);
+       }
+       else
+	       DRM_ERROR("%s Illegal Family type %d\n", __FUNCTION__, ring->adev->family_type);
+
+       ib1.ptr[2] = lower_32_bits(ib0.gpu_addr);
+       ib1.ptr[3] = upper_32_bits(ib0.gpu_addr);
+       ib1.ptr[4] = ib0.length_dw | (vmid << 24);
+       ib1.ptr[5] = LG2XX_SCMD32(LG2XX_SCMD32_OP_VMID, 0);
+       for (i = 6; i < 64; i++)
+	       ib1.ptr[i] = LG2XX_SCMD32(LG2XX_SCMD32_OP_NOP, 0);
+       ib1.length_dw = 64;
+
+       r = loonggpu_ib_schedule(ring, 1, &ib1, NULL, &f);
+       if (r)
+	       goto err2;
+
+       r = dma_fence_wait_timeout(f, false, timeout);
+       if (r == 0) {
+	       DRM_ERROR("loonggpu: two level IB test timed out.\n");
+	       r = -ETIMEDOUT;
+	       goto err2;
+       }
+       else if (r < 0) {
+	       DRM_ERROR("loonggpu: fence wait failed (%ld).\n", r);
+	       goto err2;
+       }
+
+       tmp = adev->wb.wb[index];
+       if (tmp == 0xDEADBEEF)
+	       DRM_INFO("two level ib test on ring %d succeeded\n", ring->idx);
+       else {
+	       DRM_ERROR("two level ib test on ring %d failed\n", ring->idx);
+	       r = -EINVAL;
+       }
+
+       loonggpu_ib_free(adev, &ib1, NULL);
+err2:
+	loonggpu_ib_free(adev, &ib0, NULL);
+	dma_fence_put(f);
+err1:
+	loonggpu_device_wb_free(adev, index);
+
 	return r;
 }
 
@@ -754,7 +853,9 @@ static struct loonggpu_ring_funcs gfx_ring_funcs_gfx = {
 	.emit_pipeline_sync = gfx_ring_emit_pipeline_sync,
 	.emit_vm_flush = gfx_ring_emit_vm_flush,
 	.test_ring = gfx_ring_test_ring,
+	.test_cs = loonggpu_pipe_ring_test_cs,
 	.test_ib = gfx_ring_test_ib,
+	.test_tl_ib = gfx_ring_test_tl_ib,
 	.insert_nop = loonggpu_ring_insert_nop,
 	.pad_ib = loonggpu_ring_generic_pad_ib,
 	.emit_wreg = gfx_ring_emit_wreg,

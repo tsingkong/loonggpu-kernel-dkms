@@ -141,6 +141,7 @@ void handle_cursor_update(struct drm_plane *plane,
 {
 	struct loonggpu_device *adev = plane->dev->dev_private;
 	struct loonggpu_dc *dc = adev->dc;
+	struct drm_display_mode *native_mode = &dc->native_mode;
 	struct loonggpu_framebuffer *afb;
 	struct drm_crtc *crtc;
 	struct loonggpu_crtc *loonggpu_crtc;
@@ -192,6 +193,17 @@ void handle_cursor_update(struct drm_plane *plane,
 	move.hot_y = position.y_hotspot;
 	move.x = position.x;
 	move.y = position.y;
+
+	if (loonggpu_crtc->disp_scale
+		&& dc->disp_bo[0].handle && dc->disp_bo[1].handle
+		&& ((crtc->mode.hdisplay * crtc->mode.vdisplay)
+		< (native_mode->hdisplay * native_mode->vdisplay))) {
+
+		move.x = (u32)(((((int64_t)move.x * (int64_t)native_mode->hdisplay
+				* 1000000LL) / (int64_t)crtc->mode.hdisplay) + 500000LL) / 1000000LL);
+		move.y = (u32)(((((int64_t)move.y * (int64_t)native_mode->vdisplay
+				* 1000000LL) / (int64_t)crtc->mode.vdisplay) + 500000LL) / 1000000LL);
+	}
 
 	if (!dc_submit_plane_update(adev->dc, loonggpu_crtc->crtc_id, &dc_plane))
 		DRM_ERROR("DC failed to set cursor attributes\n");

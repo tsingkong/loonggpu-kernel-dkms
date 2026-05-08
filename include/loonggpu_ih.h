@@ -65,6 +65,8 @@ struct loonggpu_ih_ring {
 	unsigned		rptr_offs;
 	bool			use_bus_addr;
 	dma_addr_t		rb_dma_addr; /* only used when use_bus_addr = true */
+	/* For waiting on IH processing at checkpoint. */
+	wait_queue_head_t wait_process;
 };
 
 #define LOONGGPU_IH_SRC_DATA_MAX_SIZE_DW 4
@@ -87,5 +89,7 @@ int loonggpu_ih_ring_init(struct loonggpu_device *adev, unsigned ring_size,
 			bool use_bus_addr);
 void loonggpu_ih_ring_fini(struct loonggpu_device *adev);
 int loonggpu_ih_process(struct loonggpu_device *adev);
+int loonggpu_ih_wait_on_checkpoint_process_ts(struct loonggpu_device *adev,
+					    struct loonggpu_ih_ring *ih);
 
 #endif /* __LOONGGPU_IH_H__ */

@@ -300,4 +300,30 @@ int bridge_phy_it66121_init(struct loonggpu_dc_bridge *dc_bridge);
 int bridge_phy_it66121_remove(struct loonggpu_bridge_phy *phy);
 int bridge_phy_ms7210_init(struct loonggpu_dc_bridge *dc_bridge);
 int bridge_phy_ms7210_remove(struct loonggpu_bridge_phy *phy);
+
+u16 drm_get_product_code(const struct edid *edid);
+const char *drm_get_edid_manufacturer(const struct edid *edid);;
+bool is_hpn_special_display(const struct edid *edid);
+bool is_eat_special_display(const struct edid *edid);
+
+static inline struct loonggpu_bridge_phy *lg_bridge_phy_alloc(struct loonggpu_device *adev,
+							const struct drm_bridge_funcs *bridge_funcs)
+{
+#if defined(devm_drm_bridge_alloc)
+	struct device *dev;
+	if (adev->loongson_dc)
+		dev = &adev->loongson_dc->dev;
+	else {
+		/* type 9a10 */
+		dev = &adev->pdev->dev;
+	}
+	return devm_drm_bridge_alloc(dev, struct loonggpu_bridge_phy, bridge, bridge_funcs);
+#else
+	struct loonggpu_bridge_phy *bridge_phy;
+
+	return kzalloc(sizeof(*bridge_phy), GFP_KERNEL);
+#endif
+}
+
+
 #endif /* __BRIDGE_PHY_H__ */

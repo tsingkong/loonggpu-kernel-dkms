@@ -25,6 +25,38 @@
 #define DP_PHY_X2                           0x1
 #define DP_PHY_X4                           0x2
 
+/* DPCD ADDR */
+#define DPCD_REV_ADDR                           0x0
+#define DPCD_MAX_LINK_RATE_ADDR                 0x1
+#define DPCD_MAX_LANE_COUNT_ADDR                0x2
+#define DPCD_TRAINING_AUX_RD_INTERVAL_ADDR      0xE
+#define DPCD_SET_POWER_ADDR                     0x600
+#define DPCD_LINK_BW_SET_ADDR                   0x100
+#define DPCD_LANE_COUNT_SET_ADDR                0x101
+#define DPCD_TRAINING_PATTERN_SET_ADDR          0x102
+#define DPCD_TRAINING_LANE0_SET_ADDR            0x103
+#define DPCD_TRAINING_LANE1_SET_ADDR            0x104
+#define DPCD_TRAINING_LANE2_SET_ADDR            0x105
+#define DPCD_TRAINING_LANE3_SET_ADDR            0x106
+#define DPCD_DOWNSPREAD_CTRL_ADDR               0x107
+#define DPCD_MSTM_CTRL_ADDR                     0x111
+#define DPCD_LANE0_1_STATUS_ADDR                0x202
+#define DPCD_LANE2_3_STATUS_ADDR                0x203
+#define DPCD_LANE_ALIGN_STATUS_UPDATED_ADDR     0x204
+#define DPCD_SINK_STATUS_ADDR                   0x205
+#define DPCD_ADJUST_REQUEST_LANE0_1_ADDR        0x206
+#define DPCD_ADJUST_REQUEST_LANE2_3_ADDR        0x207
+
+/*TRAINING_PATTERN */
+#define TRAINING_PATTERN_DISABLED      0x00  /* disable */
+#define TRAINING_PATTERN_1             0x21  /* (bit1:0=01) */
+#define TRAINING_PATTERN_2             0x22  /* (bit1:0=10) */
+#define TRAINING_PATTERN_3             0x23  /* (bit1:0=11) */
+
+/* POWER_STATE */
+#define DP_POWER_STATE_D0              0x01  /* normal operation mode */
+#define DP_POWER_STATE_D3              0x02  /* power down mode */
+
 
 typedef struct aux_msg {
 	unsigned int addr;
@@ -56,6 +88,8 @@ typedef struct {
 	unsigned int link_lane;
 } dp_bandwidth_entry_t;
 
+bool is_dp_hpd_irq(u32 reg);
+void dp_aux_lock(struct loonggpu_device *adev, int intf, bool lock);
 bool is_ls2k3000_laptop(struct loonggpu_dc_crtc *crtc);
 unsigned int aux_config(struct loonggpu_device *adev, unsigned int rd_wr, aux_msg_t aux_msg, int intf);
 int ls2k3000_dp_audio_init(struct loonggpu_dc_crtc *crtc, int intf);

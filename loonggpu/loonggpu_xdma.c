@@ -4,6 +4,7 @@
 #include "loonggpu_trace.h"
 #include "loonggpu_common.h"
 #include "loonggpu_irq.h"
+#include "loonggpu_pipe.h"
 
 static void xdma_set_ring_funcs(struct loonggpu_device *adev);
 static void xdma_set_buffer_funcs(struct loonggpu_device *adev);
@@ -1049,6 +1050,7 @@ static struct loonggpu_ring_funcs xdma_ring_funcs = {
 	.emit_pipeline_sync = xdma_ring_emit_pipeline_sync,
 	.emit_vm_flush = xdma_ring_emit_vm_flush,
 	.test_ring = xdma_ring_test_ring,
+	.test_cs = loonggpu_pipe_ring_test_cs,
 	.test_ib = xdma_ring_test_ib,
 	.test_xdma = xdma_ring_test_xdma,
 	.insert_nop = xdma_ring_insert_nop,

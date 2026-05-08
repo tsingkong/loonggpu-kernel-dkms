@@ -7,6 +7,16 @@
 #include "loonggpu_dc_resource.h"
 #include "loonggpu_helper.h"
 #include "loonggpu_dc_vbios.h"
+#include "bridge_phy.h"
+
+#define DP_IN_MASK    BIT(24)
+#define DP_OUT_MASK   BIT(25)
+#define EDP_IN_MASK   BIT(28)
+#define EDP_OUT_MASK  BIT(29)
+#define DP_LOCK       BIT(26)
+#define DP_OWNER      BIT(27)
+#define EDP_LOCK      BIT(30)
+#define EDP_OWNER     BIT(31)
 
 static const dp_bandwidth_entry_t bw_table[] = {
 	{ 162000 * 1 / 3, DP_PHY_1P62G, DP_PHY_X1 , DP_LINK_1P62G, DP_LINK_X1},
@@ -30,6 +40,27 @@ static const dp_rate_info_t  rate_table[] = {
 	{ DP_LINK_5P4G,  DP_PHY_5P4G,  540 },
 };
 
+static bool is_csw_special_display(const struct edid *edid)
+{
+    const char *manufacturer;
+    u16 product_code;
+
+    if (!edid)
+        return false;
+
+    manufacturer = drm_get_edid_manufacturer(edid);
+    if (!manufacturer) {
+        return false;
+    }
+
+    product_code = drm_get_product_code(edid);
+    if (strncmp(manufacturer, "CSW", 3) != 0) {
+        return false;
+    }
+
+    return product_code == 5209;
+}
+
 static inline int get_max_rate(unsigned int aux_rate)
 {
 	switch (aux_rate & 0xff) {
@@ -37,7 +68,10 @@ static inline int get_max_rate(unsigned int aux_rate)
 		return 162000;
 	case 0xa:
 		return 270000;
+	case 0x14:
+		return 540000;
 	default:
+		DRM_WARN("Invalid MAX_LINK_RATE value read: 0x%02x, use default value: 0x14\n", aux_rate & 0xff);
 		return 540000;
 	}
 }
@@ -49,7 +83,10 @@ static inline int get_max_lane(unsigned int aux_lane)
 		return 1;
 	case 0x2:
 		return 2;
+	case 0x4:
+		return 4;
 	default:
+		DRM_WARN("Invalid MAX_LINK_LANE value read: 0x%02x, use default value: 0x4\n", aux_lane & 0xf);
 		return 4;
 	}
 }
@@ -91,78 +128,29 @@ unsigned int aux_config(struct loonggpu_device *adev, unsigned int rd_wr, aux_ms
 {
 	unsigned int dp_detect_flag = 0;
 	unsigned int val32;
-	unsigned long count;
+	int retry_budget = 20;
 	unsigned char i;
-	u32 value;
+	u32 value, err_reason;
+	const char *op_str = (rd_wr == READ) ? "READ" : "WRITE";
 
 	if (in_interrupt()) {
 		pr_warn("DP_AUX can not be used in interrupt context.\n");
 		return -1;
 	}
 
-	if (rd_wr == READ) {
-		DRM_DEBUG_DRIVER("aux read addr: 0x%x\n", aux_msg.addr);
-		value = dc_readl(adev, gdc_reg->dp_reg[intf].aux_channel0);
-		value &= ~(0x1 << 3);
-		dc_writel(adev, gdc_reg->dp_reg[intf].aux_channel0, value);
-
-		dc_writel(adev, gdc_reg->dp_reg[intf].aux_channel1, aux_msg.addr & 0xfffff);
-		dc_writel(adev, gdc_reg->dp_reg[intf].aux_channel2, aux_msg.size & 0xfffff);
-
-		value = dc_readl(adev, gdc_reg->dp_reg[intf].aux_channel0);
-		value |= (0x1 << 2);
-		dc_writel(adev, gdc_reg->dp_reg[intf].aux_channel0, value);
-
-		msleep(10);
-
-		val32 =	dc_readl(adev, gdc_reg->dp_reg[intf].aux_monitor0);
-		count = 20;
-		while ((val32 & 0x3) == 0) {
-			val32 =	dc_readl(adev, gdc_reg->dp_reg[intf].aux_monitor0);
-			if (val32 & 0x2) {
-				DRM_DEBUG_DRIVER("dp transaction success!\n");
-				break;
-			} else if (val32 & 0x1) {
-				if ((dc_readl(adev, gdc_reg->dp_reg[intf].aux_monitor7) & 0xf00) == 0) {
-					DRM_DEBUG_DRIVER("dp transaction success, MON7 is 0!\n");
-					break;
-				} else {
-					DRM_DEBUG_DRIVER("aux monitor 5 date:0x%x\n", dc_readl(adev, gdc_reg->dp_reg[intf].aux_monitor5));
-					DRM_DEBUG_DRIVER("aux monitor 6 date:0x%x\n", dc_readl(adev, gdc_reg->dp_reg[intf].aux_monitor6));
-					DRM_DEBUG_DRIVER("aux monitor 7 date:0x%x\n", dc_readl(adev, gdc_reg->dp_reg[intf].aux_monitor7));
-					DRM_DEBUG_DRIVER("dp transaction fail!\n");
-					return -1;
-				}
-			}
-			count--;
-			msleep(10);
-
-			/* todo can't run here. */
-			if (!count) {
-				DRM_DEBUG_DRIVER("NOTE: aux read nothing, because monitor 0 val is 0\n");
-				DRM_DEBUG_DRIVER("aux monitor 5 date:0x%x\n", dc_readl(adev, gdc_reg->dp_reg[intf].aux_monitor5));
-				DRM_DEBUG_DRIVER("aux monitor 6 date:0x%x\n", dc_readl(adev, gdc_reg->dp_reg[intf].aux_monitor6));
-				DRM_DEBUG_DRIVER("aux monitor 7 date:0x%x\n", dc_readl(adev, gdc_reg->dp_reg[intf].aux_monitor7));
-				dp_detect_flag = 1;
-				return dp_detect_flag;
-			}
-		}
-
-		for (i = 0; i <= aux_msg.size; i++) {
-			DRM_DEBUG_DRIVER("aux data read: [aux base: 0x%x]: 0x%x\n", gdc_reg->dp_reg[intf].aux_monitor1 + i, \
-						readb(adev->loongson_dc_rmmio + gdc_reg->dp_reg[intf].aux_monitor1 + i));
-		}
-
-	} else if (rd_wr == WRITE) {
-		DRM_DEBUG_DRIVER("aux write addr: 0x%x\n", aux_msg.addr);
-		value = dc_readl(adev, gdc_reg->dp_reg[intf].aux_channel0);
+	DRM_DEBUG_DRIVER("AUX %s: addr=0x%05x, size=%d.\n", op_str, aux_msg.addr, aux_msg.size);
+	value = dc_readl(adev, gdc_reg->dp_reg[intf].aux_channel0);
+	value &= ~(0x1 << 3);
+	if (rd_wr == WRITE) {
 		value |= (0x1 << 3);
-		dc_writel(adev, gdc_reg->dp_reg[intf].aux_channel0, value);
+	}
+	dc_writel(adev, gdc_reg->dp_reg[intf].aux_channel0, value);
 
-		dc_writel(adev, gdc_reg->dp_reg[intf].aux_channel1, aux_msg.addr & 0xfffff);
-		dc_writel(adev, gdc_reg->dp_reg[intf].aux_channel2, aux_msg.size & 0xfffff);
+	dc_writel(adev, gdc_reg->dp_reg[intf].aux_channel1, aux_msg.addr & 0xfffff);//aux request addr
+	dc_writel(adev, gdc_reg->dp_reg[intf].aux_channel2, (aux_msg.size - 1) & 0xfffff);//aux write request data size
 
-		for (i = 0; i <= aux_msg.size; i++) {
+	if (rd_wr == WRITE) {
+		for (i = 0; i < aux_msg.size; i++) {//aux write request data    aux_channel3～7
 			if (i < 8) {
 				writeb((((aux_msg.data_low) >> (8*i)) & 0xff), adev->loongson_dc_rmmio + gdc_reg->dp_reg[intf].aux_channel3 + i);
 				DRM_DEBUG_DRIVER("aux data write: [aux base: 0x%x]: 0x%x\n", gdc_reg->dp_reg[intf].aux_channel3 + i,  \
@@ -170,53 +158,122 @@ unsigned int aux_config(struct loonggpu_device *adev, unsigned int rd_wr, aux_ms
 			} else
 				writeb(((aux_msg.data_high >> (8 * (i - 8))) & 0xff), adev->loongson_dc_rmmio + gdc_reg->dp_reg[intf].aux_channel3 + i);
 		}
-
-		value = dc_readl(adev, gdc_reg->dp_reg[intf].aux_channel0);
-		value |= (0x1 << 2);
-		dc_writel(adev, gdc_reg->dp_reg[intf].aux_channel0, value);
-
-		msleep(10);
-
-		val32 = dc_readl(adev, gdc_reg->dp_reg[intf].aux_monitor0);
-		count = 20;
-		while ((val32 & 0x3) == 0) {
-			val32 = dc_readl(adev, gdc_reg->dp_reg[intf].aux_monitor0);
-			if (val32 & 0x2) {
-				DRM_DEBUG_DRIVER("dp transaction success!\n");
-				break;
-			} else if (val32 & 0x1) {
-				if ((dc_readl(adev, gdc_reg->dp_reg[intf].aux_monitor7) & 0xf00) == 0) {
-					DRM_DEBUG_DRIVER("dp transaction success, MON7 is 0!\n");
-					break;
-				} else {
-					DRM_DEBUG_DRIVER("aux monitor 5 date:0x%x\n", dc_readl(adev, gdc_reg->dp_reg[intf].aux_monitor5));
-					DRM_DEBUG_DRIVER("aux monitor 6 date:0x%x\n", dc_readl(adev, gdc_reg->dp_reg[intf].aux_monitor6));
-					DRM_DEBUG_DRIVER("aux monitor 7 date:0x%x\n", dc_readl(adev, gdc_reg->dp_reg[intf].aux_monitor7));
-					DRM_DEBUG_DRIVER("dp transaction fail!\n");
-					return -1;
-				}
-			}
-			count--;
-			msleep(1);
-
-			/* todo can't run here. */
-			if (!count) {
-				DRM_DEBUG_DRIVER("NOTE: aux read nothing, because monitor 0 val is 0\n");
-				DRM_DEBUG_DRIVER("aux monitor 5 date:0x%x\n", dc_readl(adev, gdc_reg->dp_reg[intf].aux_monitor5));
-				DRM_DEBUG_DRIVER("aux monitor 6 date:0x%x\n", dc_readl(adev, gdc_reg->dp_reg[intf].aux_monitor6));
-				DRM_DEBUG_DRIVER("aux monitor 7 date:0x%x\n", dc_readl(adev, gdc_reg->dp_reg[intf].aux_monitor7));
-				dp_detect_flag = 1;
-				return dp_detect_flag;
-			}
-		}
 	}
 
-	return 0;
+	value = dc_readl(adev, gdc_reg->dp_reg[intf].aux_channel0);
+	value |= (0x1 << 2);
+	dc_writel(adev, gdc_reg->dp_reg[intf].aux_channel0, value);
+
+	do {
+		msleep(10);
+		val32 = dc_readl(adev, gdc_reg->dp_reg[intf].aux_monitor0);
+
+		if ((val32 == 0) &&
+			(dc_readl(adev, gdc_reg->dp_reg[intf].aux_monitor5) == 0) &&
+			(dc_readl(adev, gdc_reg->dp_reg[intf].aux_monitor6) == 0) &&
+			(dc_readl(adev, gdc_reg->dp_reg[intf].aux_monitor7) == 0)) {
+			DRM_WARN("AUX %s: aux monitor0,5,6,7 is 0 !, addr:0x%x size:%d\n", op_str, aux_msg.addr, aux_msg.size);
+			return -1;
+		}
+
+		if (val32 & 0x2) {
+			DRM_DEBUG_DRIVER("AUX %s: dp transaction success\n", op_str);
+
+			if (rd_wr == READ) {
+				for (i = 0; i < aux_msg.size; i++) {
+					DRM_DEBUG_DRIVER("aux data read: [aux base: 0x%x]: 0x%x\n", gdc_reg->dp_reg[intf].aux_monitor1 + i, \
+										readb(adev->loongson_dc_rmmio + gdc_reg->dp_reg[intf].aux_monitor1 + i));
+				}
+			}
+			return 0;
+		}
+
+		if (val32 & 0x1) {
+			DRM_INFO("AUX %s: dp transaction fail --> addr=0x%05x, size=%d.\n", op_str, aux_msg.addr, aux_msg.size);
+			err_reason = dc_readl(adev, gdc_reg->dp_reg[intf].aux_monitor5);
+
+			if ((err_reason & (1 << 4)) || (err_reason & (1 << 7))) { // Bit 4: sink_deffer
+				// Bit 4: sink_deffer, Bit 7: i2c_deffer
+				const char *defer_type = (err_reason & (1 << 4)) ? "Sink" : "I2C";
+				DRM_WARN("AUX %s: %s DEFER (device busy), %d retries left\n", op_str, defer_type, retry_budget);
+				retry_budget--;
+				if (retry_budget > 0) {
+					value = dc_readl(adev, gdc_reg->dp_reg[intf].aux_channel0);
+					value |= (0x1 << 2);
+					dc_writel(adev, gdc_reg->dp_reg[intf].aux_channel0, value);
+					continue;
+				} else {
+					DRM_ERROR("AUX %s: DEFER retries exhausted\n", op_str);
+					goto fatal_error;
+				}
+			}
+
+			if (err_reason & (1 << 0)) { // Bit 0: timeout
+				DRM_WARN("AUX %s timeout, Retry remaining times: %d!\n", op_str, retry_budget - 1);
+				retry_budget--;
+				if (retry_budget > 0) {
+					DRM_DEBUG_DRIVER("AUX %s FAILED, Retry remaining times: %d\n", op_str, retry_budget);
+					continue;
+				} else {
+					DRM_ERROR("AUX %s FAILED, NO retry remaining\n", op_str);
+					goto fatal_error;
+				}
+			}
+			else if (err_reason & (1 << 1)) { // Bit 1: rx_len_out_bound
+				DRM_ERROR("AUX %s ERROR: received data length error!\n", op_str);
+				goto fatal_error;
+			}
+			else if (err_reason & (1 << 2)) { // Bit 2: reply_command_invalid
+				DRM_ERROR("AUX %s ERROR: Invalid reply command!\n", op_str);
+				goto fatal_error;
+			}
+			else if (err_reason & (1 << 3)) { // Bit 3: sink_nack
+				DRM_ERROR("AUX %s ERROR: DP Sink device responds with NACK (address or command not accepted)!\n", op_str);
+				goto fatal_error;
+			}
+			else if (err_reason & (1 << 5)) { // Bit 5: i2c mode and reply command invalid
+				DRM_ERROR("AUX %s ERROR: i2c mode and reply command invalid!\n", op_str);
+				goto fatal_error;
+			}
+			else if (err_reason & (1 << 6)) { // Bit 6: i2c mode and sink reply nack
+				DRM_ERROR("AUX %s ERROR: i2c mode and sink reply nack!\n", op_str);
+				goto fatal_error;
+			}
+			else {
+				DRM_ERROR("AUX %s UNKNOW ERROR, err_reason: 0x%08x\n", op_str, err_reason);
+				goto fatal_error;
+			}
+		}
+
+		retry_budget--;
+
+	} while (retry_budget > 0);
+
+	DRM_ERROR("AUX %s TIMEOUT, reg status:\n", op_str);
+	DRM_ERROR("  MON0: 0x%08x, MON5: 0x%08x, MON6: 0x%08x, MON7: 0x%08x\n",
+				dc_readl(adev, gdc_reg->dp_reg[intf].aux_monitor0),
+				dc_readl(adev, gdc_reg->dp_reg[intf].aux_monitor5),
+				dc_readl(adev, gdc_reg->dp_reg[intf].aux_monitor6),
+				dc_readl(adev, gdc_reg->dp_reg[intf].aux_monitor7));
+
+	dp_detect_flag = 1;
+	return dp_detect_flag;
+
+fatal_error:
+	DRM_ERROR("AUX %s ERROR, reg status:\n", op_str);
+	DRM_ERROR("  MON0: 0x%08x, MON5: 0x%08x, MON6: 0x%08x, MON7: 0x%08x\n",
+				val32,
+				dc_readl(adev, gdc_reg->dp_reg[intf].aux_monitor5),
+				dc_readl(adev, gdc_reg->dp_reg[intf].aux_monitor6),
+				dc_readl(adev, gdc_reg->dp_reg[intf].aux_monitor7));
+
+	return -1;
 }
 
 
 static void dp_recheck_bandwidth(struct loonggpu_device *adev, struct dc_timing_info *timing, dp_feature_t *dp_param, int intf)
 {
+	struct loonggpu_connector *connector = adev->mode_info.connectors[intf];
 	unsigned int i, aux_rate = 0, aux_lane = 0, tu_size = 0;
 	unsigned int link_speed = 0, fix_pixclk = 0, allow_fix = 0;
 	unsigned int check_flag = 0;
@@ -225,19 +282,26 @@ static void dp_recheck_bandwidth(struct loonggpu_device *adev, struct dc_timing_
 	aux_msg_t aux_data;
 	int max_rate;
 	int max_lane;
+	int ret = 0;
 
-	aux_data.addr = 0x1;
-	aux_data.size = 0;
+	aux_data.addr = DPCD_MAX_LINK_RATE_ADDR;
+	aux_data.size = 1;
 	aux_data.data_low = 0;
 	aux_data.data_high = 0;
-	aux_config(adev, READ, aux_data, intf);
+	ret = aux_config(adev, READ, aux_data, intf);
+	if (ret != 0) {
+		DRM_ERROR("Interface %d: Failed to read MAX_LINK_RATE! AUX returned: %d\n", intf, ret);
+	}
 	aux_rate = dc_readl(adev, gdc_reg->dp_reg[intf].aux_monitor1);
 
-	aux_data.addr = 0x2;
-	aux_data.size = 0;
+	aux_data.addr = DPCD_MAX_LANE_COUNT_ADDR;
+	aux_data.size = 1;
 	aux_data.data_low = 0;
 	aux_data.data_high = 0;
-	aux_config(adev, READ, aux_data, intf);
+	ret = aux_config(adev, READ, aux_data, intf);
+	if (ret != 0) {
+		DRM_ERROR("Interface %d: Failed to read MAX_LINK_COUNT! AUX returned: %d\n", intf, ret);
+	}
 	aux_lane = dc_readl(adev, gdc_reg->dp_reg[intf].aux_monitor1);
 
 	max_rate = get_max_rate(aux_rate);
@@ -323,13 +387,23 @@ static void dp_recheck_bandwidth(struct loonggpu_device *adev, struct dc_timing_
 
 	timing->fixed_vsync_width = dp_param->fixed_vsync_width;
 
-	DRM_INFO("index-%d  dp_phy_rate: %d, dp_phy_xlane: %d, dp_link_rate: %d dp_pixclk: %d\n", intf, dp_param->dp_phy_rate,  \
-				dp_param->dp_phy_xlane, dp_param->dp_link_rate, dp_param->dp_pixclk);
+	/* Workaround for bxc 2.8K (5.4G 2xlnae) resolution display issue */
+	if (is_csw_special_display(connector->base.edid_blob_ptr->data) &&  \
+		timing->hdisplay == 2880 && timing->vdisplay == 1800) {
+		dp_param->dp_phy_rate  = DP_PHY_2P7G;
+		dp_param->dp_phy_xlane = DP_PHY_X4;
+		dp_param->dp_link_rate = DP_LINK_2P7G;
+		dp_param->dp_link_xlane = DP_LINK_X4;
+	}
+
+	DRM_INFO("Interface %d: dp_phy_rate: %d, dp_phy_xlane: %d, dp_link_rate: %d, dp_link_xlane: %d, dp_pixclk: %d\n",
+				intf, dp_param->dp_phy_rate, dp_param->dp_phy_xlane,
+				dp_param->dp_link_rate, dp_param->dp_link_xlane, dp_param->dp_pixclk);
 
 	if (check_flag)
-		DRM_INFO("This pclk is within the normal range.\n");
+		DRM_INFO("Interface %d: This pclk is within the normal range.\n", intf);
 	else
-		DRM_INFO("NOTE: This pclk is not within the normal range!!\n");
+		DRM_INFO("Interface %d: NOTE: This pclk is not within the normal range!!\n", intf);
 
 	return;
 }
@@ -343,19 +417,26 @@ static void edp_converters_recheck_bandwidth(struct loonggpu_device *adev, u32 c
 	uint64_t tmp;
 	int max_rate;
 	int max_lane;
+	int ret = 0;
 
-	aux_data.addr = 0x1;
-	aux_data.size = 0;
+	aux_data.addr = DPCD_MAX_LINK_RATE_ADDR;
+	aux_data.size = 1;
 	aux_data.data_low = 0;
 	aux_data.data_high = 0;
 	aux_config(adev, READ, aux_data, intf);
+	if (ret != 0) {
+		DRM_ERROR("Interface %d: Failed to read MAX_LINK_RATE! AUX returned: %d\n", intf, ret);
+	}
 	aux_rate = dc_readl(adev, gdc_reg->dp_reg[intf].aux_monitor1);
 
-	aux_data.addr = 0x2;
-	aux_data.size = 0;
+	aux_data.addr = DPCD_MAX_LANE_COUNT_ADDR;
+	aux_data.size = 1;
 	aux_data.data_low = 0;
 	aux_data.data_high = 0;
 	aux_config(adev, READ, aux_data, intf);
+	if (ret != 0) {
+		DRM_ERROR("Interface %d: Failed to read MAX_LINK_CONUT! AUX returned: %d\n", intf, ret);
+	}
 	aux_lane = dc_readl(adev, gdc_reg->dp_reg[intf].aux_monitor1);
 
 	max_rate = get_max_rate(aux_rate);
@@ -390,13 +471,14 @@ static void edp_converters_recheck_bandwidth(struct loonggpu_device *adev, u32 c
 		}
 	}
 
-	DRM_INFO("dp_phy_rate: %d, dp_phy_xlane: %d, dp_link_rate: %d dp_pixclk: %d\n", dp_param->dp_phy_rate,  \
-				dp_param->dp_phy_xlane, dp_param->dp_link_rate, dp_param->dp_pixclk);
+	DRM_INFO("Interface %d: dp_phy_rate: %d, dp_phy_xlane: %d, dp_link_rate: %d, dp_link_xlane: %d, dp_pixclk: %d\n",
+				intf, dp_param->dp_phy_rate, dp_param->dp_phy_xlane,
+				dp_param->dp_link_rate, dp_param->dp_link_xlane, dp_param->dp_pixclk);
 
 	if (check_flag)
-		DRM_INFO("This pclk is within the normal range.\n");
+		DRM_INFO("Interface %d: This pclk is within the normal range.\n", intf);
 	else
-		DRM_INFO("NOTE: This pclk is not within the normal range!!\n");
+		DRM_INFO("Interface %d: NOTE: This pclk is not within the normal range!!\n", intf);
 
 	return;
 }
@@ -418,22 +500,11 @@ static void dp_phy_init(struct loonggpu_device *adev, dp_feature_t dp_param, int
 	/* make sure that vswing and preemp settings take effect immediately */
 	value = dc_readl(adev, gdc_reg->dp_reg[intf].phy_cfg0);
 	value |= (0x1 << 31);
-	dc_writel(adev, gdc_reg->dp_reg[intf].phy_cfg0, value);
 
 	/* set phy rate & lane */
-	value = dc_readl(adev, gdc_reg->dp_reg[intf].phy_cfg0);
 	value &= ~(0x7 << 0x8);
-	dc_writel(adev, gdc_reg->dp_reg[intf].phy_cfg0, value);
-
-	value = dc_readl(adev, gdc_reg->dp_reg[intf].phy_cfg0);
 	value |= dp_param.dp_phy_rate << 0x8;
-	dc_writel(adev, gdc_reg->dp_reg[intf].phy_cfg0, value);
-
-	value = dc_readl(adev, gdc_reg->dp_reg[intf].phy_cfg0);
 	value &= ~(0x3 << 0x1);
-	dc_writel(adev, gdc_reg->dp_reg[intf].phy_cfg0, value);
-
-	value = dc_readl(adev, gdc_reg->dp_reg[intf].phy_cfg0);
 	value |= dp_param.dp_phy_xlane << 0x1;
 	dc_writel(adev, gdc_reg->dp_reg[intf].phy_cfg0, value);
 
@@ -451,10 +522,8 @@ static void dp_phy_init(struct loonggpu_device *adev, dp_feature_t dp_param, int
 
 	// set pre-emphasiss
 	value = dc_readl(adev, gdc_reg->dp_reg[intf].phy_cfg2);
-	value &= 0xf;
-	dc_writel(adev, gdc_reg->dp_reg[intf].phy_cfg2, value);
-
-	value = dc_readl(adev, gdc_reg->dp_reg[intf].phy_cfg2);
+	value |= 0xf;
+	value &= ~(0xff << 8);
 	value |= (ln_preemp[0] << 8) | (ln_preemp[1] << 10) | (ln_preemp[2] << 12) | (ln_preemp[3] << 14);
 	dc_writel(adev, gdc_reg->dp_reg[intf].phy_cfg2, value);
 	udelay(100000);
@@ -467,9 +536,6 @@ static void dp_phy_init(struct loonggpu_device *adev, dp_feature_t dp_param, int
 	/* DP/EDP phy reg 12 TODO*/
 	value = dc_readl(adev, gdc_reg->dp_reg[intf].phy_cfg12);
 	value &= ~(0xffffffff);
-	dc_writel(adev, gdc_reg->dp_reg[intf].phy_cfg12, value);
-
-	value = dc_readl(adev, gdc_reg->dp_reg[intf].phy_cfg12);
 	value |= (0x1 << 31) | (pixelclk_div_F << 8) | pixelclk_div_N;
 	dc_writel(adev, gdc_reg->dp_reg[intf].phy_cfg12, value);
 
@@ -497,6 +563,7 @@ static void dp_phy_init(struct loonggpu_device *adev, dp_feature_t dp_param, int
 	DRM_DEBUG_DRIVER("addr_dp_phy_base + 0x84 = %x \n", dc_readl(adev, gdc_reg->dp_reg[intf].phy_monitor1));
 	DRM_DEBUG_DRIVER("addr_dp_phy_base + 0x88 = %x \n", dc_readl(adev, gdc_reg->dp_reg[intf].phy_monitor2));
 
+	DRM_DEBUG_DRIVER("wait dp phy ready......\n");
 	/* wait phy ready */
 	while ((dc_readl(adev, gdc_reg->dp_reg[intf].phy_monitor0) & 0x3) != 0x3);
 
@@ -522,7 +589,7 @@ static void dp_link_init(struct loonggpu_device *adev, dp_feature_t dp_param, in
 	else if(dp_color_depth == 10)
 		mode_bpc = 1;
 	else {
-		DRM_DEBUG_DRIVER("dp color depth erro! use default value\n");
+		DRM_DEBUG_DRIVER("dp color depth error! use default value\n");
 		mode_bpc = 0;
 	}
 
@@ -547,26 +614,12 @@ static void dp_link_init(struct loonggpu_device *adev, dp_feature_t dp_param, in
 
 	value = dc_readl(adev,  gdc_reg->dp_reg[intf].link_cfg1);
 	value &= ~(0xf << 16);
-	dc_writel(adev,  gdc_reg->dp_reg[intf].link_cfg1, value);
-
-	value = dc_readl(adev,  gdc_reg->dp_reg[intf].link_cfg1);
 	value |= (mode_bpc << 16);
-	dc_writel(adev,  gdc_reg->dp_reg[intf].link_cfg1, value);
 
 	/* link rate & lane count */
-	value = dc_readl(adev,  gdc_reg->dp_reg[intf].link_cfg1);
 	value &= ~(0xff);
-	dc_writel(adev,  gdc_reg->dp_reg[intf].link_cfg1, value);
-
-	value = dc_readl(adev,  gdc_reg->dp_reg[intf].link_cfg1);
 	value |= dp_param.dp_link_rate;
-	dc_writel(adev,  gdc_reg->dp_reg[intf].link_cfg1, value);
-
-	value = dc_readl(adev,  gdc_reg->dp_reg[intf].link_cfg1);
 	value &= ~(0xff << 8);
-	dc_writel(adev,  gdc_reg->dp_reg[intf].link_cfg1, value);
-
-	value = dc_readl(adev,  gdc_reg->dp_reg[intf].link_cfg1);
 	value |= (dp_param.dp_link_xlane << 8);
 	dc_writel(adev,  gdc_reg->dp_reg[intf].link_cfg1, value);
 
@@ -584,13 +637,13 @@ static void dp_link_init(struct loonggpu_device *adev, dp_feature_t dp_param, in
 	}
 
 	if (!valid_rate) {
-		DRM_INFO("dp rate ERROR......\n");
+		DRM_ERROR("DP rate configuration error! Link rate: 0x%02x, PHY rate: 0x%x\n", link_rate, phy_rate);
 	}
 
 	if (!(((link_lane == DP_LINK_X1) && (phy_lane == DP_PHY_X1)) ||
 	     ((link_lane == DP_LINK_X2) && (phy_lane == DP_PHY_X2)) ||
 	     ((link_lane == DP_LINK_X4) && (phy_lane == DP_PHY_X4)))) {
-		DRM_INFO("dp lane ERROR......\n");
+		DRM_ERROR("DP lane configuration mismatch! Link lanes: %d, PHY lanes: 0x%x\n", link_lane, phy_lane);
 	}
 
 	/* set tu size */
@@ -609,9 +662,6 @@ static void dp_link_init(struct loonggpu_device *adev, dp_feature_t dp_param, in
 
 	value = dc_readl(adev,  gdc_reg->dp_reg[intf].link_cfg4);
 	value &= ~(0xff);
-	dc_writel(adev,  gdc_reg->dp_reg[intf].link_cfg4, value);
-
-	value = dc_readl(adev,  gdc_reg->dp_reg[intf].link_cfg4);
 	value |= tu_video_size;
 	dc_writel(adev,  gdc_reg->dp_reg[intf].link_cfg4, value);
 }
@@ -622,13 +672,18 @@ static void dp_soft_training(struct loonggpu_device *adev, dp_feature_t dp_param
 	unsigned int ln_preemp[4] = {0}, ln_preemp_max[4] = {0};
 	unsigned int ln_set[4] = {0};
 	unsigned int dp_detect_flag = 0;
-	unsigned int i, tmp, tps3_flag = 0;
+	unsigned int i, tmp, tps3_flag = 0, dpcd_rev_major, dpcd_rev_minor;
 	uint32_t ln_cr_done[4] = {0}, cr_done = 0; // CR DONE
 	uint32_t ln_eq_done[4] = {0}; // CHANNEL EQ DONE
 	uint32_t ln_sl_done[4] = {0}; // SYMBOL LOCKED
 	uint32_t interlane_align_done, lt_done, lt_cnt;
 	aux_msg_t aux_data;
-	uint32_t value;
+	uint32_t value, max_retries = 4;
+	bool training_success = false;
+	unsigned int bytes_to_read, active_xlane;
+	unsigned int interval_value, cr_interval, eq_interval;//ms
+
+	dp_aux_lock(adev, intf, true);
 
 	/* dp soft reset */
 	value = dc_readl(adev, gdc_reg->dp_reg[intf].link_cfg0);
@@ -639,152 +694,191 @@ static void dp_soft_training(struct loonggpu_device *adev, dp_feature_t dp_param
 	/* enable dp TPS1 */
 	dc_writel(adev, gdc_reg->dp_reg[intf].link_cfg0, 0x3850038b);
 
-	aux_data.addr = 0;
-	aux_data.size = 5;
+	aux_data.addr = DPCD_REV_ADDR;
+	aux_data.size = 1;
 	aux_data.data_low = 0;
 	aux_data.data_high = 0;
 	dp_detect_flag = aux_config(adev, READ, aux_data, intf);
 	if (dp_detect_flag == 1) {
-		DRM_INFO("No Dp device detected! \n");
-		goto end;
+		DRM_ERROR("Interface %d: No DP device detected!\n", intf);
+		goto training_end;
 	}
+	tmp = dc_readl(adev, gdc_reg->dp_reg[intf].aux_monitor1) & 0xFF;
+	dpcd_rev_major = (tmp >> 4) & 0x0F;
+	dpcd_rev_minor = tmp & 0x0F;
+	DRM_INFO("Interface %d: DP version: %d.%d\n", intf, dpcd_rev_major, dpcd_rev_minor);
 
-	aux_data.addr = 0x2;
-	aux_data.size = 0;
+	aux_data.addr = DPCD_MAX_LANE_COUNT_ADDR;
+	aux_data.size = 1;
 	aux_data.data_low = 0;
 	aux_data.data_high = 0;
 	aux_config(adev, READ, aux_data, intf);
-
 	tps3_flag = (dc_readl(adev,  gdc_reg->dp_reg[intf].aux_monitor1) >> 6) & 0x1;
 	if(tps3_flag == 1)
-		DRM_DEBUG_DRIVER("TPS3 supported...\n");
+		DRM_DEBUG_DRIVER("Interface %d: TPS3 training pattern supported\n", intf);
 
-	aux_data.addr = 0x600;
-	aux_data.size = 0;
-	aux_data.data_low = 0x2;
-	aux_data.data_high = 0;
-	aux_config(adev,  WRITE, aux_data, intf);
-	udelay(10000);
-
-	aux_data.addr = 0x600;
-	aux_data.size = 0;
-	aux_data.data_low = 0x1;
+	aux_data.addr = DPCD_SET_POWER_ADDR;
+	aux_data.size = 1;
+	aux_data.data_low = DP_POWER_STATE_D3;
 	aux_data.data_high = 0;
 	aux_config(adev, WRITE, aux_data, intf);
 	udelay(10000);
-
-	aux_data.addr = 0x600;
-	aux_data.size = 0;
-	aux_data.data_low = 0x1;
-	aux_data.data_high = 0;
+	aux_data.data_low = DP_POWER_STATE_D0;
+	aux_config(adev, WRITE, aux_data, intf);
+	udelay(10000);
+	aux_data.data_low = DP_POWER_STATE_D0;
 	aux_config(adev, WRITE, aux_data, intf);
 	udelay(10000);
 
-	aux_data.addr = 0x100;
-	aux_data.size = 0;
+	aux_data.addr = DPCD_LINK_BW_SET_ADDR;
+	aux_data.size = 1;
 	aux_data.data_low = dp_param.dp_link_rate;
 	aux_data.data_high = 0;
 	aux_config(adev, WRITE, aux_data, intf);
 
-	aux_data.addr = 0x101;
-	aux_data.size = 0;
+	aux_data.addr = DPCD_LANE_COUNT_SET_ADDR;
+	aux_data.size = 1;
 	aux_data.data_low = 0;
 	aux_data.data_high = 0;
 	aux_config(adev, READ, aux_data, intf);
 
-	aux_data.addr = 0x101;
-	aux_data.size = 0;
-	aux_data.data_low = 0xa0 | dp_param.dp_link_xlane;
+	aux_data.addr = DPCD_LANE_COUNT_SET_ADDR;
+	aux_data.size = 1;
+	aux_data.data_low = 0x80 | dp_param.dp_link_xlane;
 	aux_data.data_high = 0;
 	aux_config(adev, WRITE, aux_data, intf);
 
-	aux_data.addr = 0x111;
-	aux_data.size = 0;
-	aux_data.data_low = 0;
-	aux_data.data_high = 0;
-	aux_config(adev, WRITE, aux_data, intf);
-
-	aux_data.addr = 0x107;
-	aux_data.size = 0;
+	aux_data.addr = DPCD_DOWNSPREAD_CTRL_ADDR;
+	aux_data.size = 1;
 	aux_data.data_low = 0x10;
 	aux_data.data_high = 0;
 	aux_config(adev, WRITE, aux_data, intf);
 
-	aux_data.addr = 0x101;
-	aux_data.size = 0;
-	aux_data.data_low = 0xa0 | dp_param.dp_link_xlane;
+	aux_data.addr = DPCD_LANE_COUNT_SET_ADDR;
+	aux_data.size = 1;
+	aux_data.data_low = 0x80 | dp_param.dp_link_xlane;
 	aux_data.data_high = 0;
 	aux_config(adev, WRITE, aux_data, intf);
 
-	aux_data.addr = 0x102;
-	aux_data.size = 0;
-	aux_data.data_low = 0x21;
+	aux_data.addr = DPCD_TRAINING_AUX_RD_INTERVAL_ADDR;
+	aux_data.size = 1;
+	aux_data.data_low = 0;
+	aux_data.data_high = 0;
+	aux_config(adev, READ, aux_data, intf);
+	interval_value = dc_readl(adev, gdc_reg->dp_reg[intf].aux_monitor1) & 0xFF;
+	DRM_DEBUG_DRIVER("Interface %d: Link Status/Adjust Request read interval: 0x%x \n", intf, interval_value);
+	if (interval_value == 0x00) {
+		cr_interval = 2;
+		eq_interval = 8;
+	} else if (interval_value <= 0x04) {
+		cr_interval = eq_interval = interval_value * 4;
+	} else {
+		cr_interval = 10;
+		eq_interval = 20;
+	}
+
+	if (dpcd_rev_major < 1 || (dpcd_rev_major == 1 && dpcd_rev_minor < 2)) { //dp < 1.2 , add time interval
+		cr_interval = 10;
+		eq_interval = 40;
+	}
+
+	DRM_INFO("Interface %d: Starting TPS1 (Clock Recovery) training\n", intf);
+	aux_data.addr = DPCD_TRAINING_PATTERN_SET_ADDR;
+	aux_data.size = 1;
+	aux_data.data_low = TRAINING_PATTERN_1;
 	aux_data.data_high = 0;
 	aux_config(adev, WRITE, aux_data, intf);
 
-	DRM_DEBUG_DRIVER("wait for CR_DONE!\n");
-	udelay(10000);
-
+	active_xlane = dp_param.dp_link_xlane;
+	bytes_to_read = (active_xlane > 2) ? 2 : 1;
 	lt_cnt = 0;
 
-	while (lt_cnt < 4) {
+	while (lt_cnt < max_retries) {
+		DRM_DEBUG_DRIVER("wait for CR_DONE!\n");
+		udelay(cr_interval * 1000);
+
 		/* training lane req from sink */
-		aux_data.addr = 0x206;
-		aux_data.size = 1;
+		aux_data.addr = DPCD_ADJUST_REQUEST_LANE0_1_ADDR;
+		aux_data.size = bytes_to_read;
 		aux_data.data_low = 0;
 		aux_data.data_high = 0;
 		aux_config(adev, READ, aux_data, intf);
 
 		tmp = dc_readl(adev,  gdc_reg->dp_reg[intf].aux_monitor1);
-		for (i = 0; i < 4; i++) {
+		for (i = 0; i < active_xlane; i++) {
 			ln_preemp[i] = (tmp >> (2 + i * 4)) & 0x3;
-			ln_vswing[i] = lt_cnt;
+			ln_vswing[i] = (tmp >> (i * 4)) & 0x3;
 			ln_vswing_max[i] = (ln_vswing[i] == 0x3) ? 1 : 0;
 			ln_preemp_max[i] = (ln_preemp[i] == 0x3) ? 1 : 0;
 			ln_set[i] = ln_vswing[i] | (ln_vswing_max[i] << 2) |
 				(ln_preemp[i] << 3) | (ln_preemp_max[i] << 5);
+		}
 
-			aux_data.addr = (0x103 + i);
-			aux_data.size = 0;
+		if (!(dpcd_rev_major == 1 && dpcd_rev_minor < 2)) {
+			/* set dp phy pe and vs */
+			value = dc_readl(adev, gdc_reg->dp_reg[intf].phy_cfg2);
+			value |= 0xf;
+			value &= ~(0xff << 8);
+			value |= (ln_preemp[0] << 8) | (ln_preemp[1] << 10) | (ln_preemp[2] << 12) | (ln_preemp[3] << 14);
+			dc_writel(adev, gdc_reg->dp_reg[intf].phy_cfg2, value);
+			udelay(100 * 1000);
+
+			value = (4 - ln_vswing[0]) | ((4 - ln_vswing[1]) << 3) | ((4 - ln_vswing[2]) << 6) | ((4 - ln_vswing[3]) << 9);
+			dc_writel(adev, gdc_reg->dp_reg[intf].phy_cfg7, value);
+			udelay(100 * 1000);
+		}
+
+		for (i = 0; i < active_xlane; i++) {
+			aux_data.addr = (DPCD_TRAINING_LANE0_SET_ADDR + i);
+			aux_data.size = 1;
 			aux_data.data_low = ln_set[i];
 			aux_data.data_high = 0;
 			aux_config(adev, WRITE, aux_data,  intf);
 		}
-		udelay(10000);
+		udelay(cr_interval * 1000);
 
-		aux_data.addr = 0x202;
-		aux_data.size = 5;
+		aux_data.addr = DPCD_LANE0_1_STATUS_ADDR;
+		aux_data.size = bytes_to_read;
 		aux_data.data_low = 0;
 		aux_data.data_high = 0;
 		aux_config(adev, READ, aux_data, intf);
 		tmp = dc_readl(adev,  gdc_reg->dp_reg[intf].aux_monitor1);
 
-		for (i = 0; i < 4; i++)
+		for (i = 0; i < active_xlane; i++)
 			ln_cr_done[i] = (tmp >> (i * 4)) & 0x1;
 
-		cr_done = (dp_param.dp_link_xlane == 4) ? (ln_cr_done[0] & ln_cr_done[1] & ln_cr_done[2] & ln_cr_done[3]) :
-					(dp_param.dp_link_xlane == 2) ? (ln_cr_done[0] & ln_cr_done[1]) :
-					(dp_param.dp_link_xlane == 1) ? (ln_cr_done[0]) : 0;
+		cr_done = (active_xlane == 4) ? (ln_cr_done[0] & ln_cr_done[1] & ln_cr_done[2] & ln_cr_done[3]) :
+					(active_xlane == 2) ? (ln_cr_done[0] & ln_cr_done[1]) :
+					(active_xlane == 1) ? (ln_cr_done[0]) : 0;
 
-		if (cr_done)
+		if (cr_done) {
+			DRM_INFO("Interface %d: TPS1 Clock Recovery successful after %d attempts. cr_interval: %dms\n",
+			          intf, lt_cnt + 1, cr_interval);
 			break;
+		}
 
 		lt_cnt++;
+		cr_interval = cr_interval + 5;
+	}
+
+	if (!cr_done) {
+		DRM_WARN("Interface %d: TPS1 Clock Recovery failed after %d attempts\n", intf, max_retries);
+		goto skip_tps23;
 	}
 
 	if (tps3_flag == 1) {
-		DRM_INFO("set TPS3...\n");
-		aux_data.addr = 0x102;
-		aux_data.size = 0;
-		aux_data.data_low = 0x23;
+		DRM_INFO("Interface %d: Starting TPS3 training\n", intf);
+		aux_data.addr = DPCD_TRAINING_PATTERN_SET_ADDR;
+		aux_data.size = 1;
+		aux_data.data_low = TRAINING_PATTERN_3;
 		aux_data.data_high = 0;
 		aux_config(adev, WRITE, aux_data, intf);
 		dc_writel(adev, gdc_reg->dp_reg[intf].link_cfg0, 0x3810038b | (0x4 << 22)); // enable TPS3
 	} else {
-		DRM_INFO("set TPS2...\n");
-		aux_data.addr = 0x102;
-		aux_data.size = 0;
-		aux_data.data_low = 0x22;
+		DRM_INFO("Interface %d: Starting TPS2 training\n", intf);
+		aux_data.addr = DPCD_TRAINING_PATTERN_SET_ADDR;
+		aux_data.size = 1;
+		aux_data.data_low = TRAINING_PATTERN_2;
 		aux_data.data_high = 0;
 		aux_config(adev, WRITE, aux_data, intf);
 		dc_writel(adev, gdc_reg->dp_reg[intf].link_cfg0, 0x3810038b | (0x2 << 22)); // enable TPS2
@@ -793,89 +887,133 @@ static void dp_soft_training(struct loonggpu_device *adev, dp_feature_t dp_param
 	lt_cnt = 0;
 	lt_done = 0;
 
-	while (lt_cnt < 4) {
+	while (lt_cnt < max_retries) {
 		DRM_DEBUG_DRIVER("wait a second!\n");
-		udelay(40000);
+		udelay(eq_interval * 1000);
 
 		/* training lane req from sink */
-		aux_data.addr = 0x206;
-		aux_data.size = 1;
+		aux_data.addr = DPCD_ADJUST_REQUEST_LANE0_1_ADDR;
+		aux_data.size = bytes_to_read;
 		aux_data.data_low = 0;
 		aux_data.data_high = 0;
 		aux_config(adev, READ, aux_data, intf);
 		tmp = dc_readl(adev,  gdc_reg->dp_reg[intf].aux_monitor1);
 
-		for (i = 0; i < 4; i++) {
+		for (i = 0; i < active_xlane; i++) {
 			ln_vswing[i] = (tmp >> (i * 4)) & 0x3;
 			ln_preemp[i] = (tmp >> (2 + i * 4)) & 0x3;
 			ln_vswing_max[i] = (ln_vswing[i] == 0x3) ? 1 : 0;
 			ln_preemp_max[i] = (ln_preemp[i] == 0x3) ? 1 : 0;
 			ln_set[i] = ln_vswing[i] | (ln_vswing_max[i] << 2) |
 				(ln_preemp[i] << 3) | (ln_preemp_max[i] << 5);
+		}
 
+                if (!(dpcd_rev_major == 1 && dpcd_rev_minor < 2)) {
+                        /* set dp phy pe and vs */
+                        value = dc_readl(adev, gdc_reg->dp_reg[intf].phy_cfg2);
+                        value |= 0xf;
+                        value &= ~(0xff << 8);
+                        value |= (ln_preemp[0] << 8) | (ln_preemp[1] << 10) | (ln_preemp[2] << 12) | (ln_preemp[3] << 14);
+                        dc_writel(adev, gdc_reg->dp_reg[intf].phy_cfg2, value);
+                        udelay(100 * 1000);
+
+                        value = (4 - ln_vswing[0]) | ((4 - ln_vswing[1]) << 3) | ((4 - ln_vswing[2]) << 6) | ((4 - ln_vswing[3]) << 9);
+                        dc_writel(adev, gdc_reg->dp_reg[intf].phy_cfg7, value);
+                        udelay(100 * 1000);
+                }
+
+		for (i = 0; i < active_xlane; i++) {
 			DRM_DEBUG_DRIVER("ln_set[%d] = %x \n", i, ln_set[i]);
-			aux_data.addr = (0x103 + i);
-			aux_data.size = 0;
+			aux_data.addr = (DPCD_TRAINING_LANE0_SET_ADDR + i);
+			aux_data.size = 1;
 			aux_data.data_low = ln_set[i];
 			aux_data.data_high = 0;
 			aux_config(adev, WRITE, aux_data, intf);
 		}
 
 		DRM_DEBUG_DRIVER("wait a second!\n");
-		udelay(40000);
+		udelay(eq_interval * 1000);
 
-		aux_data.addr = 0x202;
-		aux_data.size = 5;
+		aux_data.addr = DPCD_LANE0_1_STATUS_ADDR;
+		aux_data.size = bytes_to_read;
 		aux_data.data_low = 0;
 		aux_data.data_high = 0;
 		aux_config(adev, READ, aux_data, intf);
 		tmp = dc_readl(adev,  gdc_reg->dp_reg[intf].aux_monitor1);
 
-		for (i = 0; i < 4; i++) {
-			ln_cr_done[i] = (tmp >> (i * 4)) & 0x1;
-			ln_eq_done[i] = (tmp >> (1 + i * 4)) & 0x1;
-			ln_sl_done[i] = (tmp >> (2 + i * 4)) & 0x1;
+		for (i = 0; i < active_xlane; i++) {
+			ln_cr_done[i] = (tmp >> (i * 4)) & 0x1;         /* bit0: CR_DONE */
+			ln_eq_done[i] = (tmp >> (1 + i * 4)) & 0x1;     /* bit1: CHANNEL_EQ_DONE */
+			ln_sl_done[i] = (tmp >> (2 + i * 4)) & 0x1;     /* bit2: SYMBOL_LOCKED */
 		}
 
-		interlane_align_done = (tmp >> 16) & 0x1;
+		aux_data.addr = DPCD_LANE_ALIGN_STATUS_UPDATED_ADDR;
+		aux_data.size = 1;
+		aux_data.data_low = 0;
+		aux_data.data_high = 0;
+		aux_config(adev, READ, aux_data, intf);
+		tmp = dc_readl(adev,  gdc_reg->dp_reg[intf].aux_monitor1);
+		interlane_align_done = tmp & 0x1;   /* Bit 0 = INTERLANE_ALIGN_DONE */
 
-		lt_done = (dp_param.dp_link_xlane == 4) ?
-			(ln_cr_done[0] & ln_cr_done[1] & ln_cr_done[2] & ln_cr_done[3] &
-			 ln_eq_done[0] & ln_eq_done[1] & ln_eq_done[2] & ln_eq_done[3] &
-			 ln_sl_done[0] & ln_sl_done[1] & ln_sl_done[2] & ln_sl_done[3] & interlane_align_done) :
-			(dp_param.dp_link_xlane == 2) ?
-			(ln_cr_done[0] & ln_cr_done[1] &
-			 ln_eq_done[0] & ln_eq_done[1] &
-			 ln_sl_done[0] & ln_sl_done[1] & interlane_align_done) :
-			(ln_cr_done[0] & ln_eq_done[0] & ln_sl_done[0] & interlane_align_done);
+		if (active_xlane == 4) {
+			lt_done = ln_cr_done[0] & ln_cr_done[1] & ln_cr_done[2] & ln_cr_done[3] &
+			          ln_eq_done[0] & ln_eq_done[1] & ln_eq_done[2] & ln_eq_done[3] &
+			          ln_sl_done[0] & ln_sl_done[1] & ln_sl_done[2] & ln_sl_done[3] &
+			          interlane_align_done;
+		} else if (active_xlane == 2) {
+			lt_done = ln_cr_done[0] & ln_cr_done[1] &
+			          ln_eq_done[0] & ln_eq_done[1] &
+			          ln_sl_done[0] & ln_sl_done[1] &
+			          interlane_align_done;
+		} else {  /* 1 lane */
+			lt_done = ln_cr_done[0] & ln_eq_done[0] & ln_sl_done[0] & interlane_align_done;
+		}
 
-		DRM_DEBUG_DRIVER("lt_done = 0x%x\n", lt_done);
-
-		if (lt_done == 1)
+		if (lt_done) {
+			DRM_INFO("Interface %d: TPS%s training successful after %d attempts. eq/sl/al_interval: %dms\n",
+			          intf, tps3_flag ? "3" : "2", lt_cnt + 1, eq_interval);
+			training_success = true;
 			break;
-
-		for (i = 0; i < 4; i++) {
-			DRM_DEBUG_DRIVER("ln_cr_done[%d] = 0x%x\n", i, ln_cr_done[i]);
-			DRM_DEBUG_DRIVER("ln_eq_done[%d] = 0x%x\n", i, ln_eq_done[i]);
-			DRM_DEBUG_DRIVER("ln_sl_done[%d] = 0x%x\n", i, ln_sl_done[i]);
 		}
-		DRM_DEBUG_DRIVER("interlane_align_done = 0x%x\n", interlane_align_done);
 
 		lt_cnt++;
+		eq_interval = eq_interval + 5;
 	}
 
-	aux_data.addr = 0x102;
-	aux_data.size = 0;
-	aux_data.data_low = 0;
+	if (!lt_done) {
+		DRM_WARN("Interface %d: TPS%s training failed after %d attempts\n", intf, tps3_flag ? "3" : "2", max_retries);
+		aux_data.addr = DPCD_LANE0_1_STATUS_ADDR;
+		aux_data.size = 3;
+		aux_data.data_low = 0;
+		aux_data.data_high = 0;
+		aux_config(adev, READ, aux_data, intf);
+		tmp = dc_readl(adev,  gdc_reg->dp_reg[intf].aux_monitor1);
+		DRM_WARN("Interface %d: lane status:0x%x, active_xlane:%d\n", intf, tmp, active_xlane);
+	}
+
+skip_tps23:
+	aux_data.addr = DPCD_TRAINING_PATTERN_SET_ADDR;
+	aux_data.size = 1;
+	aux_data.data_low = TRAINING_PATTERN_DISABLED;
 	aux_data.data_high = 0;
 	aux_config(adev, WRITE, aux_data, intf);
-	udelay(10000);
+	udelay(cr_interval * 1000);
 
-end:
+training_end:
 	dc_writel(adev, gdc_reg->dp_reg[intf].link_cfg0, 0x3830038b);
 	value = dc_readl(adev, gdc_reg->dp_reg[intf].link_cfg0);
 	value |= (0x3 << 20);
 	dc_writel(adev, gdc_reg->dp_reg[intf].link_cfg0, value);
+
+	if (training_success) {
+		DRM_INFO("Interface %d: DP soft training completed successfully\n", intf);
+	} else if (dp_detect_flag == 1) {
+		DRM_ERROR("Interface %d: DP training aborted - no device detected\n", intf);
+	} else {
+		DRM_ERROR("Interface %d: DP training failed.\n", intf);
+	}
+
+	dp_aux_lock(adev, intf, false);
 
 	return;
 }
@@ -951,23 +1089,25 @@ bool ls2k3000_dp_enable(struct loonggpu_dc_crtc *crtc, int intf, bool enable)
 		(!enable && !crtc->intf[intf].enabled))
 		return true;
 
+	dp_aux_lock(adev, intf, true);
 	if (enable) {
-		aux_data.addr = 0x600;
-		aux_data.size = 0;
-		aux_data.data_low = 0x1;
+		aux_data.addr = DPCD_SET_POWER_ADDR;
+		aux_data.size = 1;
+		aux_data.data_low = DP_POWER_STATE_D0;
 		aux_data.data_high = 0;
 		ret = aux_config(adev,  WRITE, aux_data, intf);
 		if (!ret)
 			crtc->intf[intf].enabled = true;
 	} else {
-		aux_data.addr = 0x600;
-		aux_data.size = 0;
-		aux_data.data_low = 2;
+		aux_data.addr = DPCD_SET_POWER_ADDR;
+		aux_data.size = 1;
+		aux_data.data_low = DP_POWER_STATE_D3;
 		aux_data.data_high = 0;
 		ret = aux_config(adev,  WRITE, aux_data, intf);
 		if (!ret)
 			crtc->intf[intf].enabled = false;
 	}
+	dp_aux_lock(adev, intf, false);
 
 	DRM_INFO("SWITCH DISPLAY THROUGH AUX: %d-%d\n", enable, ret);
 	return true;
@@ -992,6 +1132,8 @@ int ls2k3000_dp_aux_detect_status(struct loonggpu_dc_crtc *crtc, int intf)
 	struct connector_resource *connector_res;
 	unsigned int detect_flag = 1;
 	aux_msg_t aux_data;
+	u32 link_cfg0;
+	u32 phy_cfg0;
 	int i;
 
 	connector_res = adev->dc->link_info[intf].connector;
@@ -1005,12 +1147,13 @@ int ls2k3000_dp_aux_detect_status(struct loonggpu_dc_crtc *crtc, int intf)
 		* hotplug status is not required.
 		*/
 		if (connector_res->hotplug != FORCE_ON) {
-			aux_data.addr = 0;
-			aux_data.size = 5;
+			dp_aux_lock(adev, intf, true);
+			aux_data.addr = DPCD_REV_ADDR;
+			aux_data.size = 1;
 			aux_data.data_low = 0;
 			aux_data.data_high = 0;
 			detect_flag = aux_config(adev, READ, aux_data, intf);
-
+			dp_aux_lock(adev, intf, false);
 			for (i = 0; i < crtc->interfaces; i++) {
 				switch (crtc->intf[i].type) {
 				case INTERFACE_DP:
@@ -1029,6 +1172,22 @@ int ls2k3000_dp_aux_detect_status(struct loonggpu_dc_crtc *crtc, int intf)
 					break;
 				}
 			}
+
+			/**
+			 * For some board designs that do not support multiple display interfaces over a single display link
+			 * and have strict power-saving requirements, the DP controller and DP PHY are powered down.
+			 */
+			if (!connector_res->multi_interface && intf) {
+				adev->dp_status[1] = 0x8;
+
+				phy_cfg0 = dc_readl(adev, gdc_reg->dp_reg[intf].phy_cfg0);
+				phy_cfg0 &= ~0x1;
+				dc_writel(adev, gdc_reg->dp_reg[intf].phy_cfg0, phy_cfg0);
+
+				link_cfg0 = dc_readl(adev, gdc_reg->dp_reg[intf].link_cfg0);
+				link_cfg0 &= ~0x1;
+				dc_writel(adev, gdc_reg->dp_reg[intf].link_cfg0, link_cfg0);
+			}
 		}
 	}
 
@@ -1045,87 +1204,77 @@ int ls2k3000_dp_init(struct loonggpu_dc_crtc *crtc, int intf)
 	return ls2k3000_dp_aux_detect_status(crtc, intf);
 }
 
-void l2k3000_hpd_irq_handler(struct loonggpu_device *adev, struct loonggpu_iv_entry *entry)
+bool is_dp_hpd_irq(u32 reg)
 {
-	u32 int_reg1 = 0;
+	uint32_t mask = DP_IN_MASK | DP_OUT_MASK | EDP_IN_MASK | EDP_OUT_MASK;
 
-	if (gdc_reg->global_reg.intr_1) {
-		int_reg1 = dc_readl(adev, gdc_reg->global_reg.intr_1);
-		if (int_reg1)
-			dc_writel(adev, gdc_reg->global_reg.intr_1, int_reg1);
+	return (mask & reg) != 0;
+}
+
+void dp_aux_lock(struct loonggpu_device *adev, int intf, bool lock)
+{
+	u32 int_reg = 0;
+	u32 lock_mask;
+
+	lock_mask = intf ? DP_LOCK : EDP_LOCK;
+	int_reg	= dc_readl(adev, gdc_reg->global_reg.intr_en);
+
+	if (int_reg & lock_mask && lock)
+		return;
+
+	if (!(int_reg & lock_mask) && !lock)
+		return;
+
+	switch (intf) {
+	case 0:
+		if (lock)
+			int_reg |= (EDP_LOCK | EDP_OWNER);
+		else
+			int_reg &= ~(EDP_LOCK | EDP_OWNER);
+		break;
+	case 1:
+		if (lock)
+			int_reg |= (DP_LOCK | DP_OWNER);
+		else
+			int_reg &= ~(DP_LOCK | DP_OWNER);
+		break;
 	}
 
-	int_reg1 &= 0xffff;
-	switch (int_reg1) {
-	case LS2K3000_EDP_IN:
-	case LS2K3000_EDP_OUT:
-		adev->dp_status[0] = int_reg1;
-		entry->src_id = DC_INT_ID_HPD_EDP;
-		loonggpu_irq_dispatch(adev, entry);
-		break;
-	case LS2K3000_DP_IN:
-	case LS2K3000_DP_OUT:
-		adev->dp_status[1] = int_reg1;
-		entry->src_id = DC_INT_ID_HPD_DP;
-		loonggpu_irq_dispatch(adev, entry);
-		break;
-	case LS2K3000_EDP_IN_DP_IN:
-		/*
-		* When both EDP and DP displays are plugged in simultaneously, their hotplug interrupts
-		* are asserted together. The value read from the interrupt status register 1 is 0x3, so
-		* the corresponding hotplug events need to be serviced separately.
-		**/
-		adev->dp_status[0] = LS2K3000_EDP_IN;
-		entry->src_id = DC_INT_ID_HPD_EDP;
-		loonggpu_irq_dispatch(adev, entry);
+	dc_writel(adev, gdc_reg->global_reg.intr_en, int_reg);
+}
 
-		adev->dp_status[1] = LS2K3000_DP_IN;
+void l2k3000_hpd_irq_handler(struct loonggpu_device *adev, struct loonggpu_iv_entry *entry)
+{
+	u32 hpd_status = 0;
+	u32 dp_hpd_en = 0;
+
+	dp_hpd_en = dc_readl(adev, gdc_reg->global_reg.intr_en);
+	hpd_status = (dp_hpd_en >> 24) & 0xff;
+
+	switch (hpd_status) {
+	case DP_HPD_IN:
+		dc_writel(adev, gdc_reg->global_reg.intr_en, dp_hpd_en & (~DP_IN_MASK));
+		adev->dp_status[1] = 0x2;
 		entry->src_id = DC_INT_ID_HPD_DP;
 		loonggpu_irq_dispatch(adev, entry);
 		break;
-	case LS2K3000_EDP_OUT_DP_IN:
-		/*
-		* When EDP unplug and DP plug-in events occur simultaneously, their hotplug interrupts
-		* are asserted together. The value read from interrupt status register 1 is 0x6, requiring
-		* separate handling of the corresponding hotplug events.
-		*/
-		adev->dp_status[0] = LS2K3000_EDP_OUT;
+	case DP_HPD_OUT:
+		dc_writel(adev, gdc_reg->global_reg.intr_en, dp_hpd_en & (~DP_OUT_MASK));
+		adev->dp_status[1] = 0x8;
+		entry->src_id = DC_INT_ID_HPD_DP;
+		loonggpu_irq_dispatch(adev, entry);
+		break;
+	case EDP_HPD_IN:
+		dc_writel(adev, gdc_reg->global_reg.intr_en, dp_hpd_en & (~EDP_IN_MASK));
+		adev->dp_status[0] = 0x1;
 		entry->src_id = DC_INT_ID_HPD_EDP;
 		loonggpu_irq_dispatch(adev, entry);
-
-		adev->dp_status[1] = LS2K3000_DP_IN;
-		entry->src_id = DC_INT_ID_HPD_DP;
-		loonggpu_irq_dispatch(adev, entry);
 		break;
-	case LS2K3000_EDP_IN_DP_OUT:
-		/*
-		* When EDP plug-in and DP unplug events occur simultaneously, their hotplug interrupts
-		* are asserted together. The value read from interrupt status register 1 is 0x9, requiring
-		* separate handling of the corresponding hotplug events.
-		*/
-		adev->dp_status[0] = LS2K3000_EDP_IN;
+	case EDP_HPD_OUT:
+		dc_writel(adev, gdc_reg->global_reg.intr_en, dp_hpd_en & (~EDP_OUT_MASK));
+		adev->dp_status[0] = 0x4;
 		entry->src_id = DC_INT_ID_HPD_EDP;
 		loonggpu_irq_dispatch(adev, entry);
-
-		adev->dp_status[1] = LS2K3000_DP_OUT;
-		entry->src_id = DC_INT_ID_HPD_DP;
-		loonggpu_irq_dispatch(adev, entry);
-		break;
-	case LS2K3000_EDP_OUT_DP_OUT:
-		/*
-		* When both EDP and DP displays are unplugged simultaneously, their hotplug interrupts
-		* are asserted together. The value read from interrupt status register 1 is 0xc, so
-		* the corresponding hotplug events need to be serviced separately.
-		**/
-		adev->dp_status[0] = LS2K3000_EDP_OUT;
-		entry->src_id = DC_INT_ID_HPD_EDP;
-		loonggpu_irq_dispatch(adev, entry);
-
-		adev->dp_status[1] = LS2K3000_DP_OUT;
-		entry->src_id = DC_INT_ID_HPD_DP;
-		loonggpu_irq_dispatch(adev, entry);
-		break;
-	default:
 		break;
 	}
 }
@@ -1159,19 +1308,21 @@ void l2k3000_dp_first_hdp_detect(struct loonggpu_dc_crtc *crtc, int intf)
 	* cycle must be performed via the AUX channel. Otherwise, certain displays may fail to report
 	* the correct connection status
 	*/
-	aux_msg.addr = 0x600;
-	aux_msg.size = 0;
-	aux_msg.data_low = 0x2;
+	dp_aux_lock(adev, intf, true);
+	aux_msg.addr = DPCD_SET_POWER_ADDR;
+	aux_msg.size = 1;
+	aux_msg.data_low = DP_POWER_STATE_D3;
 	aux_msg.data_high = 0;
 	aux_config(adev,  WRITE, aux_msg, intf);
 	udelay(10000);
 
-	aux_msg.addr = 0x600;
-	aux_msg.size = 0;
-	aux_msg.data_low = 0x1;
+	aux_msg.addr = DPCD_SET_POWER_ADDR;
+	aux_msg.size = 1;
+	aux_msg.data_low = DP_POWER_STATE_D0;
 	aux_msg.data_high = 0;
 	aux_config(adev,  WRITE, aux_msg, intf);
 	udelay(10000);
+	dp_aux_lock(adev, intf, false);
 
 	ls2k3000_dp_aux_detect_status(crtc, intf);
 }

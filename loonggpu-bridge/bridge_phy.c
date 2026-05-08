@@ -11,7 +11,7 @@
 
 #define DEBUG_FILTERED_MODES 0
 
-static u16 drm_get_product_code(const struct edid *edid)
+u16 drm_get_product_code(const struct edid *edid)
 {
     if (!edid) {
 		DRM_INFO( "edid is NULL \n");
@@ -22,7 +22,7 @@ static u16 drm_get_product_code(const struct edid *edid)
                     (uint16_t)edid->prod_code[0];
 }
 
-static const char *drm_get_edid_manufacturer(const struct edid *edid)
+const char *drm_get_edid_manufacturer(const struct edid *edid)
 {
     char mfg[3];
 
@@ -34,7 +34,7 @@ static const char *drm_get_edid_manufacturer(const struct edid *edid)
     return kasprintf(GFP_KERNEL, "%c%c%c", mfg[0], mfg[1], mfg[2]);
 }
 
-static bool is_eat_special_display(const struct edid *edid)
+bool is_eat_special_display(const struct edid *edid)
 {
     const char *manufacturer;
     u16 product_code;
@@ -56,7 +56,7 @@ static bool is_eat_special_display(const struct edid *edid)
     return (product_code == 9984 && serial == 1);
 }
 
-static bool is_hpn_special_display(const struct edid *edid)
+bool is_hpn_special_display(const struct edid *edid)
 {
     const char *manufacturer;
     u16 product_code;
@@ -404,6 +404,90 @@ int drm_connector_edid_intersection(struct drm_connector *actual_connector,
 	return valid_mode_count;
 }
 
+static struct drm_display_mode *
+loonggpu_dc_create_common_mode(struct drm_connector *connector,
+			     char *name,
+			     int hdisplay, int vdisplay)
+{
+	struct loonggpu_device *adev = connector->dev->dev_private;
+	struct drm_device *dev = adev->ddev;
+	struct drm_display_mode *mode = NULL;
+	struct drm_display_mode *native_mode = &adev->dc->native_mode;
+
+	mode = drm_mode_duplicate(dev, native_mode);
+
+	if (mode == NULL)
+		return NULL;
+
+	mode->hdisplay = hdisplay;
+	mode->vdisplay = vdisplay;
+	mode->type &= ~DRM_MODE_TYPE_PREFERRED;
+	strncpy(mode->name, name, DRM_DISPLAY_MODE_LEN);
+
+	return mode;
+
+}
+
+static int loonggpu_dc_connector_add_common_modes(struct drm_connector *connector)
+{
+	struct loonggpu_device *adev = connector->dev->dev_private;
+	struct drm_display_mode *mode = NULL;
+	struct drm_display_mode *native_mode = &adev->dc->native_mode;
+	int num_modes = 0;
+
+	int i;
+	int n;
+	struct mode_size {
+		char name[DRM_DISPLAY_MODE_LEN];
+		int w;
+		int h;
+	} common_modes[] = {
+		{  "640x480",  640,  480},
+		{  "800x600",  800,  600},
+		{ "1024x768", 1024,  768},
+		{ "1280x720", 1280,  720},
+		{ "1280x800", 1280,  800},
+		{"1280x1024", 1280, 1024},
+		{ "1440x900", 1440,  900},
+		{"1680x1050", 1680, 1050},
+		{"1600x1200", 1600, 1200},
+		{"1920x1080", 1920, 1080},
+		{"1920x1200", 1920, 1200}
+	};
+
+	n = ARRAY_SIZE(common_modes);
+
+	for (i = 0; i < n; i++) {
+		struct drm_display_mode *curmode = NULL;
+		bool mode_existed = false;
+
+		if (common_modes[i].w > native_mode->hdisplay ||
+		    common_modes[i].h > native_mode->vdisplay ||
+		   (common_modes[i].w == native_mode->hdisplay &&
+		    common_modes[i].h == native_mode->vdisplay))
+			continue;
+
+		list_for_each_entry(curmode, &connector->probed_modes, head) {
+			if (common_modes[i].w == curmode->hdisplay &&
+			    common_modes[i].h == curmode->vdisplay) {
+				mode_existed = true;
+				break;
+			}
+		}
+
+		if (mode_existed)
+			continue;
+
+		mode = loonggpu_dc_create_common_mode(connector,
+				common_modes[i].name, common_modes[i].w,
+				common_modes[i].h);
+		drm_mode_probed_add(connector, mode);
+		num_modes++;
+	}
+
+	return num_modes;
+}
+
 int loonggpu_dc_get_modes(struct loonggpu_bridge_phy *phy, int used_method,
 					struct drm_connector *connector, struct edid *edid)
 {
@@ -453,6 +537,8 @@ static int bridge_phy_connector_get_modes(struct drm_connector *connector)
 	int size = sizeof(u8) * EDID_LENGTH * 2;
 	struct edid *edid = NULL;
 	unsigned int count = 0;
+	struct loonggpu_crtc *lcrtc =
+		adev->mode_info.crtcs[connector->index];
 
 	if (used_method == via_vbios) {
 		connector_resource = dc_get_vbios_resource(internal_bp->adev->dc->vbios, connector->index, LOONGGPU_RESOURCE_CONNECTOR);
@@ -467,6 +553,12 @@ static int bridge_phy_connector_get_modes(struct drm_connector *connector)
 	} else {
 		if (dc->hw_ops->dc_get_modes)
 			count = dc->hw_ops->dc_get_modes(phy, used_method, connector, edid);
+	}
+
+	if (lcrtc->disp_scale) {
+		/* add scaled modes */
+		count += loonggpu_dc_connector_add_common_modes(connector);
+		return count;
 	}
 
 	if (!count) {
@@ -1137,7 +1229,7 @@ struct loonggpu_bridge_phy *bridge_phy_alloc(struct loonggpu_dc_bridge *dc_bridg
 	struct connector_resource *connector_res =
 			dc_bridge->adev->dc->link_info[index].connector;
 
-	bridge_phy = kzalloc(sizeof(*bridge_phy), GFP_KERNEL);
+	bridge_phy = lg_bridge_phy_alloc(dc_bridge->adev, &bridge_funcs);
 	if (IS_ERR(bridge_phy)) {
 		DRM_ERROR("Failed to alloc loonggpu bridge phy!\n");
 		return NULL;
