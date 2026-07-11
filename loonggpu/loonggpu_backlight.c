@@ -234,20 +234,62 @@ static unsigned int loonggpu_backlight_get(struct loonggpu_backlight *ls_bl)
 }
 
 static void loonggpu_backlight_set(struct loonggpu_backlight *ls_bl,
-		unsigned int level)
+		unsigned int level_raw)
 {
 	unsigned int period_ns;
 	unsigned int duty_ns;
+	unsigned int level_max, level_min, level_range;
+	unsigned int level_index, level_next;
+	unsigned int duty_index, max_index;
+	unsigned int index;
+	struct pwm_light *light;
 
 	if (IS_ERR(ls_bl->pwm))
 		return;
 
-	level = clamp(level, ls_bl->min, ls_bl->max);
-	period_ns = ls_bl->pwm_period;
-	duty_ns = DIV_ROUND_UP((level * period_ns), ls_bl->max);
+	level_raw = clamp(level_raw, ls_bl->min, ls_bl->max);
 
-	DRM_DEBUG("Set backlight: level=%d, 0x%x/0x%x ns.\n",
-		  level, duty_ns, period_ns);
+	period_ns = ls_bl->pwm_period;
+	duty_ns = DIV_ROUND_UP((level_raw * period_ns), ls_bl->max);
+
+	if (ls_bl->light.used) {
+		light = &ls_bl->light;
+		max_index = light->level_count - 1;
+
+		level_range = light->tables[max_index].level - light->tables[0].level;
+		level_min = clamp(DIV_ROUND_CLOSEST(light->tables[0].level
+					* (ls_bl->max - ls_bl->min), level_range), ls_bl->min, ls_bl->max);
+		level_max = clamp(DIV_ROUND_CLOSEST(light->tables[max_index].level
+					* (ls_bl->max - ls_bl->min), level_range), ls_bl->min, ls_bl->max);
+
+		for (index = 0; index <= max_index; index++) {
+			duty_index = light->tables[index].duty;
+			level_index = clamp(DIV_ROUND_CLOSEST(light->tables[index].level
+						* (ls_bl->max - ls_bl->min), level_range), ls_bl->min, ls_bl->max);
+			if (level_raw <= level_min) {
+				duty_ns = DIV_ROUND_UP((light->tables[0].duty * period_ns), 100);
+				break;
+			} else if (level_raw >= level_max) {
+				duty_ns = DIV_ROUND_UP((light->tables[max_index].duty * period_ns), 100);
+				break;
+			} else if (level_raw == level_index) {
+				duty_ns = DIV_ROUND_UP((duty_index * period_ns), 100);
+				break;
+			} else {
+				level_next = clamp(DIV_ROUND_CLOSEST(light->tables[index + 1].level
+							* (ls_bl->max - ls_bl->min), level_range), ls_bl->min, ls_bl->max);
+				if ((level_raw > level_index) && (level_raw < level_next)) {
+					duty_index = DIV_ROUND_CLOSEST(light->tables[index + 1].duty - duty_index,
+							level_next - level_index) * (level_raw - level_index) + duty_index;
+					duty_ns = DIV_ROUND_UP((duty_index * period_ns), 100);
+					break;
+				}
+			}
+		}
+	}
+
+	DRM_DEBUG("Set backlight: level_raw=%d, 0x%x/0x%x ns.\n",
+		  level_raw, duty_ns, period_ns);
 
 	pwm_config(ls_bl->pwm, duty_ns, period_ns);
 }
@@ -306,6 +348,7 @@ ERROR_EN:
 ERROR_VDD:
 	lg_pwm_free(ls_bl->pwm);
 ERROR_PWM:
+	lg_pwm_remove_table();
 	return -ENODEV;
 }
 
@@ -441,9 +484,11 @@ static struct loonggpu_backlight
 	/* 0:low start, 1:high start */
 	ls_bl->pwm_polarity = pwm_res->polarity;
 	ls_bl->pwm_period = pwm_res->peroid;
+	ls_bl->light = pwm_res->light;
 
-	DRM_INFO("pwm: id=%d, period=%dns, polarity=%d.\n",
-		 ls_bl->pwm_id, ls_bl->pwm_period, ls_bl->pwm_polarity);
+	DRM_INFO("pwm: id=%d, period=%dns, polarity=%d, light_tables=%d.\n",
+		 ls_bl->pwm_id, ls_bl->pwm_period, ls_bl->pwm_polarity,
+		 ls_bl->light.used ? ls_bl->light.level_count: 0);
 
 	/* init lcd_ctrl */
 	ls_bl->lcd_ctrl = loonggpu_lcd_ctrl_init(adev, ls_bl, index);
@@ -513,4 +558,19 @@ int loonggpu_backlight_register(struct drm_connector *connector)
 		 ls_bl->hw_enabled ? "on" : "off");
 
 	return ret;
+}
+
+int loonggpu_late_register(struct drm_connector *connector)
+{
+	int ret;
+
+	/*
+	 * loonggpu driver can also be loaded,
+	 * although backlight is not supported.
+	 */
+	ret = loonggpu_backlight_register(connector);
+	if (ret)
+		DRM_INFO("backlight is not supported, err_no: %d\n",ret);
+
+	return 0;
 }

@@ -379,7 +379,7 @@ static void configmpll(struct loonggpu_dc_crtc *crtc, int intf)
 static int ls2k3000_calc_phy_clk(unsigned int pixclock_khz)
 {
 	unsigned int tx_clkdiv_set[] = {1, 2, 3, 4, 5, 6, 8, 10};
-	unsigned int prec_set[] = {1, 5, 10, 50, 100, 1000};	//in 1/PCLK_PRECISION_INDICATOR
+	unsigned int tx_rate_set[] = {1, 2, 4, 8};
 	unsigned int tx_rate, multiplier, tx_clkdiv;
 	int i, j;
 	unsigned int precision_req, precision;
@@ -389,18 +389,15 @@ static int ls2k3000_calc_phy_clk(unsigned int pixclock_khz)
 	int offset;
 
 	pixclock_mhz = pixclock_khz / 1000;
-	//try precsion from high to low
-	for (j = 0; j < sizeof(prec_set) / sizeof(uint32_t); j++) {
-		precision_req = prec_set[j];
-		//try each refc
-		for (i = 0; i < sizeof(tx_clkdiv_set) / sizeof(uint32_t); i++) {
-			tx_clkdiv = tx_clkdiv_set[i];
-			multiplier_min = (4500 / 27) / 2;  //1200 / (PLL_REF_CLK_MHZ / refc)
-			multiplier_max = (6500 / 27) / 2;  //3200 / (PLL_REF_CLK_MHZ / refc)
-			multiplier_mid = (5500 / 27) / 2;  //(loopc_min + loopc_max) / 2;
-
+	precision_req = ~0;
+	multiplier_min = (4500 / 27) / 2;
+	multiplier_max = (6500 / 27) / 2;
+	multiplier_mid = (5500 / 27) / 2;
+	for (i = 0; i < sizeof(tx_clkdiv_set) / sizeof(uint32_t); i++) {
+		tx_clkdiv = tx_clkdiv_set[i];
+		for (j = 0; j < (sizeof(tx_rate_set) / sizeof(uint32_t)); j++) {
+			tx_rate = tx_rate_set[j];
 			offset = 0;
-			//try each loopc
 			for (multiplier = multiplier_mid; (multiplier <= multiplier_max) && (multiplier >= multiplier_min); multiplier += offset) {
 				if (offset < 0) {
 					offset = -(offset - 1);
@@ -408,30 +405,23 @@ static int ls2k3000_calc_phy_clk(unsigned int pixclock_khz)
 					offset = -(offset + 1);
 				}
 
-				tx_rate = (2 * multiplier * 27) / tx_clkdiv / 5 / pixclock_mhz;
-				if ((tx_rate != 1) && (tx_rate != 2) && (tx_rate != 4) && (tx_rate != 8)) continue;
-
 				real_dvo = (2 * multiplier * 27) / tx_clkdiv / 5 / tx_rate;
 				req_dvo  = pixclock_mhz;
 				precision = abs(real_dvo * PCLK_PRECISION_INDICATOR / req_dvo - PCLK_PRECISION_INDICATOR);
-
 				if (precision < precision_req) {
+					precision_req = precision;
 					mpllcfg.multiplier = multiplier;
 					mpllcfg.tx_clkdiv = tx_clkdiv;
 					mpllcfg.tx_rate   = tx_rate;
-					DRM_INFO("for pixclock = %d mhz, found: multiplier = %d, "
-							"tx_clkdiv = %d, tx_rate = %d, precision = %d / %d.\n", pixclock_mhz,
-							multiplier, tx_clkdiv, tx_rate, precision+1, PCLK_PRECISION_INDICATOR);
-					if (j > 1) {
-						DRM_INFO("Warning: PIX clock precision degraded to %d / %d\n", precision_req, PCLK_PRECISION_INDICATOR);
-					}
-
-					return 1;
 				}
 			}
 		}
+		if (precision_req == 0) break;
 	}
-	return 0;
+	DRM_INFO("for pixclock = %d mhz, found: multiplier = %d, "
+			"tx_clkdiv = %d, tx_rate = %d, precision = %d / %d.\n", pixclock_mhz,
+			mpllcfg.multiplier, mpllcfg.tx_clkdiv, mpllcfg.tx_rate, precision_req, PCLK_PRECISION_INDICATOR);
+	return true;
 }
 
 void ls2k3000_hdmi_pll_set(struct loonggpu_dc_crtc *crtc, int intf, int clock)

@@ -371,6 +371,26 @@ export_symbol_gpl_conftest() {
     fi
 }
 
+export_symbol_conftest() {
+    #
+    # Check Module.symvers to see whether the given symbol is present.
+    #
+
+    SYMBOL="$1"
+    TAB='	'
+
+    if grep -e "${TAB}${SYMBOL}${TAB}.*${TAB}EXPORT_\(UNUSED_\)*SYMBOL\s*\$" \
+               "$OUTPUT/Module.symvers" >/dev/null 2>&1; then
+        echo "#define LG_IS_EXPORT_SYMBOL_$SYMBOL 1" |
+            append_conftest "symbols"
+    else
+        # May be a false negative if Module.symvers is absent or incomplete,
+        # or if the Module.symvers format changes.
+        echo "#define LG_IS_EXPORT_SYMBOL_$SYMBOL 0" |
+            append_conftest "symbols"
+    fi
+}
+
 get_configuration_option() {
     #
     # Print the value of given configuration option, if defined
@@ -488,6 +508,13 @@ compile_test() {
             export_symbol_gpl_conftest "pwm_add_table"
         ;;
 
+        pwm_remove_table)
+            #
+            # Determine whether pwm_remove_table function is exported in kernel.
+            #
+            export_symbol_gpl_conftest "pwm_remove_table"
+        ;;
+
         drm_driver_irq_shared_flag_present)
             #
             # Determine whether driver feature flag DRIVER_IRQ_SHARED is present.
@@ -559,6 +586,40 @@ compile_test() {
             }"
 
             compile_check_conftest "$CODE" "LG_HRTIMER_INIT" "" "type"
+        ;;
+
+        get_kernel_page_size_4k)
+            #
+            # Determine gpu PAGE_SIZE.
+            #
+            CODE="
+            #include <asm/page.h>
+            #if (PAGE_SIZE == 0x1000)
+               ;
+            #else
+                void test_fail(void) {
+                    a++;
+                }
+            #endif
+            "
+            compile_check_conftest "$CODE" "LG_VM_PAGE_SIZE_4K" "" "type"
+        ;;
+
+        get_kernel_page_size_16k)
+            #
+            # Determine gpu PAGE_SIZE.
+            #
+            CODE="
+            #include <asm/page.h>
+            #if (PAGE_SIZE == 0x4000)
+               ;
+            #else
+                void test_fail(void) {
+                    a++;
+                }
+            #endif
+            "
+            compile_check_conftest "$CODE" "LG_VM_PAGE_SIZE_16K" "" "type"
         ;;
 
         drm_do_get_edid)
@@ -1307,6 +1368,21 @@ compile_test() {
                 return 0;
             }"
             compile_check_conftest "$CODE" "LG_DRM_SCHED_INIT_HAS_SUBMIT_WQ" "" "types"
+        ;;
+
+        drm_sched_job_has_id)
+            #
+            # Determine if drm_sched_job has id member.
+            #
+            # Changed by commit 4f7fa5fa414cc2990afbdffc0333f7c7ba3756b1
+            # drm: Get rid of drm_sched_job.id") in v6.16-rc1
+            #
+            CODE="
+            #include <drm/gpu_scheduler.h>
+            int conftest_drm_sched_job_has_id(void) {
+                return offsetof(struct drm_sched_job, id);
+            }"
+            compile_check_conftest "$CODE" "LG_DRM_SCHED_JOB_HAS_ID" "" "types"
         ;;
 
         drm_sched_job_init_has_credits)
@@ -2447,6 +2523,20 @@ compile_test() {
                pwm_free();
             }"
             compile_check_conftest "$CODE" "LG_PWM_FREE" "" "functions"
+        ;;
+
+        turn_on_lvds)
+            #
+            # Determine if turn_on_lvds exist.
+            #
+            export_symbol_conftest "turn_on_lvds"
+        ;;
+
+        turn_off_lvds)
+            #
+            # Determine if turn_off_lvds exist.
+            #
+            export_symbol_conftest "turn_off_lvds"
         ;;
 
         drm_mode_config_has_fb_base)

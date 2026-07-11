@@ -1125,7 +1125,8 @@ static int bpipe_entity_init(struct loonggpu_device *adev)
 	ring = &adev->bpipe.ring;
 	rq = lg_sched_to_sched_rq(&ring->sched, DRM_SCHED_PRIORITY_KERNEL);
 	sched = &ring->sched;
-	r = lg_drm_sched_entity_init(&adev->bpipe.entity, DRM_SCHED_PRIORITY_KERNEL, &sched, 1, &rq, 1, NULL);
+	r = lg_drm_sched_entity_init(&adev->bpipe.entity, DRM_SCHED_PRIORITY_KERNEL,
+						&sched, 1, &rq, 1, NULL);
 	if (r != 0) {
 		DRM_ERROR("Failed setting up BPIPE run queue.\n");
 		return r;

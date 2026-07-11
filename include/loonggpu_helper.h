@@ -282,10 +282,15 @@ struct dma_buf *lg_loonggpu_gem_prime_export(
 					  struct drm_gem_object *gobj,
 					  int flags);
 
-static inline void lg_loongson_screen_state(int state)
+static inline void lg_loongson_screen_state(bool state)
 {
 #if defined(LG_LOONGSON_SCREEN_STATE)
-	loongson_screen_state(state);
+	static unsigned int state_old = 0xff;
+
+	if (state_old != state) {
+		state_old = state;
+		loongson_screen_state(state);
+	}
 #endif
 }
 
@@ -580,6 +585,28 @@ static inline void lg_pwm_free(struct pwm_device *pwm)
 	pwm_free(pwm);
 #else
 	pwm_put(pwm);
+#endif
+}
+
+#if LG_IS_EXPORT_SYMBOL_turn_on_lvds
+extern int turn_on_lvds(void);
+#endif
+
+#if LG_IS_EXPORT_SYMBOL_turn_off_lvds
+extern int turn_off_lvds(void);
+#endif
+
+static inline void lg_turn_on_lvds(void)
+{
+#if LG_IS_EXPORT_SYMBOL_turn_on_lvds
+	turn_on_lvds();
+#endif
+}
+
+static inline void lg_turn_off_lvds(void)
+{
+#if LG_IS_EXPORT_SYMBOL_turn_off_lvds
+	turn_off_lvds();
 #endif
 }
 
@@ -1147,6 +1174,18 @@ static inline void lg_pwm_add_table(struct pwm_lookup *table, size_t num)
 {
 	if (LG_IS_EXPORT_SYMBOL_GPL_pwm_add_table == 1)
 		pwm_add_table(table, num);
+}
+
+static inline void lg_pwm_remove_table(void)
+{
+	if (LG_IS_EXPORT_SYMBOL_GPL_pwm_remove_table == 1) {
+		/* make sure pwm_lookup structure is valid */
+		if (loongson_pwm_lookup.provider) {
+			pwm_remove_table(&loongson_pwm_lookup, 1);
+			/* clear pwm_lookup structure after remove it */
+			memset(&loongson_pwm_lookup, 0, sizeof(struct pwm_lookup));
+		}
+	}
 }
 
 static inline struct pwm_device *lg_pwm_request(struct device *dev,

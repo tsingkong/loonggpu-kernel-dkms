@@ -68,6 +68,7 @@ struct pwm_resource {
 	u8 pwm;
 	u8 polarity;
 	u32 peroid;
+	struct pwm_light light;  /* feature >= 2 */
 };
 
 struct crtc_resource {
@@ -145,6 +146,7 @@ struct panel_resource {
 	u32 max_hdisplay;
 	u32 max_vdisplay;
 	struct timing timing[16];
+	u32 max_pixclk; //khz
 };
 
 struct lcd_ctrl_resource {
@@ -214,6 +216,7 @@ enum vbios_encoder_chip {
 	ENCODER_CHIP_ID_INTERNAL_HDMI = 0X02,
 	ENCODER_CHIP_ID_INTERNAL_EDP = 0X03,
 	ENCODER_CHIP_ID_INTERNAL_DP = 0X04,
+	ENCODER_CHIP_ID_INTERNAL_COMPOSITE = 0x05,
 
 	/* VGA: 0x10~-0x1f */
 	ENCODER_CHIP_ID_VGA_CH7055 = 0X10,
@@ -236,6 +239,8 @@ enum vbios_encoder_chip {
 	ENCODER_CHIP_ID_EDP_NCS8803 = 0x41,
 	ENCODER_CHIP_ID_EDP_LT9721 = 0x42,
 	ENCODER_CHIP_ID_EDP_LT6711 = 0x43,
+	ENCODER_CHIP_ID_EDP_ICNM7601 = 0x44,
+	ENCODER_CHIP_ID_EDP_CS5611AQ_S = 0x45,
 	ENCODER_CHIP_ID_EDP_TRANSPARENT = 0x4F,
 
 	/* HDMI to LVDS */

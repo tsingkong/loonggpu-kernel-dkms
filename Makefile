@@ -48,9 +48,26 @@ else
     endif
   endif
 
-  CC ?= cc
+  CC := gcc
   LD ?= ld
   OBJDUMP ?= objdump
+  module_build_flags :=
+
+  ifneq ($(CONFIG_CC_IS_CLANG),)
+    ifeq ($(shell command -v clang > /dev/null && echo "y"),)
+      $(error "clang is not installed, exit...")
+    endif
+    ifeq ($(shell command -v ld.lld > /dev/null && echo "y"),)
+      $(error "ld.lld is not installed, exit...")
+    endif
+
+    CC := clang
+    module_build_flags += CC=clang
+    module_build_flags += LD=ld.lld
+    module_build_flags += LLVM=1
+  endif
+  LG_CC := $(CC)
+  export LG_CC
 
   ifndef ARCH
     ARCH := $(shell uname -m | sed -e 's/i.86/i386/' \
@@ -77,6 +94,7 @@ else
   KBUILD_PARAMS += LG_KERNEL_MODULES="$(LG_KERNEL_MODULES)"
   KBUILD_PARAMS += INSTALL_MOD_DIR=kernel/drivers/gpu/drm/loonggpu/gpu
   KBUILD_PARAMS += LG_SPECTRE_V2=$(SPECTRE_V2_RETPOLINE)
+  KBUILD_PARAMS += $(module_build_flags)
 
   .PHONY: modules module clean clean_conftest modules_install
   modules clean modules_install:

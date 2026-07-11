@@ -604,6 +604,10 @@ int loonggpu_vm_flush(struct loonggpu_ring *ring, struct loonggpu_job *job, bool
 	if (!vm_flush_needed && !need_pipe_sync)
 		return 0;
 
+	if (need_pipe_sync && (ldev->family_type == CHIP_LG200 || ldev->family_type == CHIP_LG210)) {
+		loonggpu_soft_pipeline_sync(ring);
+	}
+
 	if (pasid_mapping_needed)
 		loonggpu_gmc_emit_pasid_mapping(ring, job->vmid, job->pasid);
 

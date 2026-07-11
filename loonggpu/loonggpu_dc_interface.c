@@ -7,6 +7,9 @@
 #include "loonggpu_dc_reg.h"
 #include "loonggpu_helper.h"
 
+extern struct pci_dev *loongson_gpu_pdev;
+extern struct pci_dev *loongson_dc_pdev;
+
 int dc_interface_noaudio_init(struct loonggpu_dc_crtc *crtc)
 {
 	struct loonggpu_dc *dc = crtc->dc;
@@ -31,12 +34,19 @@ int dc_interface_audio_init(struct loonggpu_dc_crtc *crtc)
 {
 	struct loonggpu_dc *dc = crtc->dc;
 	int i;
+	struct pci_dev *dev = loongson_gpu_pdev;
 
 	for (i = 0; i < crtc->interfaces; i++) {
 		if (crtc->intf[i].connected) {
 			switch (crtc->intf[i].type) {
 			case INTERFACE_HDMI:
+				if (!loongson_gpu_pdev)
+					dev = loongson_dc_pdev;
+				dev = pci_get_slot(dev->bus, (dev->devfn & ~7) | 2);
+				if (dev != NULL && !crtc->dc->adev->loongson_hdmi_hda_rmmio)
+					crtc->dc->adev->loongson_hdmi_hda_rmmio = pci_iomap(dev, 0, pci_resource_len(dev, 0));
 				dc->hw_ops->hdmi_audio_init(crtc, crtc->intf[i].index);
+
 				break;
 			case INTERFACE_EDP:
 				dc->hw_ops->dp_audio_init(crtc, crtc->intf[i].index);
@@ -165,7 +175,6 @@ bool dc_interface_status_changed(struct drm_connector *connector, struct loonggp
 	struct loonggpu_dc *dc = crtc->dc;
 
 	if (dc->hw_ops->interface_status_changed) {
-		crtc->timing->clock = 0;
 		return dc->hw_ops->interface_status_changed(connector, crtc);
 	}
 

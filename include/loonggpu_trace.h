@@ -142,6 +142,9 @@ TRACE_EVENT(loonggpu_cs_ioctl,
 	    TP_PROTO(struct loonggpu_job *job),
 	    TP_ARGS(job),
 	    TP_STRUCT__entry(
+#if defined(LG_DRM_SCHED_JOB_HAS_ID)
+			     __field(uint64_t, sched_job_id)
+#endif
 			     __field(unsigned int, context)
 			     __field(unsigned int, seqno)
 			     __field(struct dma_fence *, fence)
@@ -150,20 +153,33 @@ TRACE_EVENT(loonggpu_cs_ioctl,
 			     ),
 
 	    TP_fast_assign(
+#if defined(LG_DRM_SCHED_JOB_HAS_ID)
+			   __entry->sched_job_id = job->base.id;
+#endif
 			   __entry->context = job->base.s_fence->finished.context;
 			   __entry->seqno = job->base.s_fence->finished.seqno;
 			   __entry->ring_name = to_loonggpu_ring(job->base.sched)->name;
 			   __entry->num_ibs = job->num_ibs;
 			   ),
+
+#if defined(LG_DRM_SCHED_JOB_HAS_ID)
+	    TP_printk("sched_job=%llu, context=%u, seqno=%u, ring_name=%s, num_ibs=%u",
+		      __entry->sched_job_id, __entry->context,
+		      __entry->seqno, __entry->ring_name, __entry->num_ibs)
+#else
 	    TP_printk("context=%u, seqno=%u, ring_name=%s, num_ibs=%u",
 		      __entry->context,
 		      __entry->seqno, __entry->ring_name, __entry->num_ibs)
+#endif
 );
 
 TRACE_EVENT(loonggpu_sched_run_job,
 	    TP_PROTO(struct loonggpu_job *job),
 	    TP_ARGS(job),
 	    TP_STRUCT__entry(
+#if defined(LG_DRM_SCHED_JOB_HAS_ID)
+			     __field(uint64_t, sched_job_id)
+#endif
 			     __field(unsigned int, context)
 			     __field(unsigned int, seqno)
 			     __field(char *, ring_name)
@@ -171,14 +187,23 @@ TRACE_EVENT(loonggpu_sched_run_job,
 			     ),
 
 	    TP_fast_assign(
+#if defined(LG_DRM_SCHED_JOB_HAS_ID)
+			   __entry->sched_job_id = job->base.id;
+#endif
 			   __entry->context = job->base.s_fence->finished.context;
 			   __entry->seqno = job->base.s_fence->finished.seqno;
 			   __entry->ring_name = to_loonggpu_ring(job->base.sched)->name;
 			   __entry->num_ibs = job->num_ibs;
 			   ),
+#if defined(LG_DRM_SCHED_JOB_HAS_ID)
+	    TP_printk("sched_job=%llu, context=%u, seqno=%u, ring_name=%s, num_ibs=%u",
+		      __entry->sched_job_id, __entry->context,
+		      __entry->seqno, __entry->ring_name, __entry->num_ibs)
+#else
 	    TP_printk("context=%u, seqno=%u, ring_name=%s, num_ibs=%u",
 		      __entry->context,
 		      __entry->seqno, __entry->ring_name, __entry->num_ibs)
+#endif
 );
 
 

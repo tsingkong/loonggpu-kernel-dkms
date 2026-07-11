@@ -36,6 +36,7 @@ int loonggpu_testing;
 int loonggpu_disp_priority;
 int loonggpu_msi = -1;
 int loonggpu_lockup_timeout = 10000;
+int loonggpu_gfx_lockup_timeout = 2000;
 int loonggpu_dpm = 0;
 int loonggpu_runtime_pm = -1;
 int loonggpu_vm_size = -1;
@@ -147,6 +148,14 @@ module_param_named(msi, loonggpu_msi, int, 0444);
  */
 MODULE_PARM_DESC(lockup_timeout, "GPU lockup timeout in ms > 0 (default 10000)");
 module_param_named(lockup_timeout, loonggpu_lockup_timeout, int, 0444);
+
+/**
+ * DOC: gfx_lockup_timeout (int)
+ * Set GPU gfx scheduler timeout value in ms. Value 0 is invalidated, will be adjusted to 2000.
+ * Negative values mean 'infinite timeout' (MAX_JIFFY_OFFSET). The default is 2000.
+ */
+MODULE_PARM_DESC(gfx_lockup_timeout, "GPU gfx lockup timeout in ms > 0 (default 2000)");
+module_param_named(gfx_lockup_timeout, loonggpu_gfx_lockup_timeout, int, 0444);
 
 /**
  * DOC: dpm (int)

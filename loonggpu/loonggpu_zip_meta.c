@@ -27,7 +27,7 @@ int loonggpu_zip_meta_vram_alloc(struct loonggpu_device *adev)
 
 	memset(&bp, 0, sizeof(bp));
 	bp.size = adev->zip_meta.table_size;
-	bp.byte_align = LOONGGPU_GEM_COMPRESSED_SIZE;
+	bp.byte_align = adev->zip_meta.table_size;
 	bp.domain = LOONGGPU_GEM_DOMAIN_VRAM;
 	bp.flags = LOONGGPU_GEM_CREATE_CPU_ACCESS_REQUIRED |
 		LOONGGPU_GEM_CREATE_VRAM_CONTIGUOUS;

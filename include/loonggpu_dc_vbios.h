@@ -78,6 +78,7 @@ struct vbios_pwm {
 	u8 pwm;
 	u8 polarity;
 	u32 peroid;
+	struct pwm_light light;  /* feature >= 2 */
 } __packed;
 
 struct vbios_encoder {
@@ -131,6 +132,7 @@ struct vbios_panel
 	u32 max_hdisplay;
 	u32 max_vdisplay;
 	struct timing timing[16];
+	u32 max_pixclk; // feature >= 1
 } __packed;
 
 struct vbios_ext_encoder {

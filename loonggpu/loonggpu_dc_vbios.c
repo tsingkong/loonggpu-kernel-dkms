@@ -59,6 +59,8 @@ static bool read_bios_from_sysconf(struct loonggpu_dc *dc)
 #if defined(LG_LOONGSON_SYS_CONF_HAS_VGABIOS_ADDR)
 	if (!loongson_sysconf.vgabios_addr)
 		return false;
+	else if(!virt_addr_valid((void *)loongson_sysconf.vgabios_addr))
+		return false;
 #else
 	return false;
 #endif
@@ -96,6 +98,11 @@ static bool read_bios_from_acpi(struct loonggpu_dc *dc)
 	dc->vbios->vbios_ptr = kmalloc(VBIOS_SIZE, GFP_KERNEL);
 	if (!dc->vbios->vbios_ptr)
 		return false;
+
+	if (!pfn_valid(PFN_DOWN(viat->vbios_addr))) {
+		kfree(dc->vbios->vbios_ptr);
+		return false;
+	}
 
 	vaddr = phys_to_virt(viat->vbios_addr);
 	memcpy(dc->vbios->vbios_ptr, vaddr, VBIOS_SIZE);
@@ -336,7 +343,7 @@ static bool parse_vbios_dpm_config(struct vbios_desc *vb_desc, struct loonggpu_v
 
 static bool parse_vbios_default(struct vbios_desc *vb_desc, struct loonggpu_vbios *vbios)
 {
-	DRM_ERROR("Current descriptor[T-%d][V-%d] cannot be interprete.\n",
+	DRM_WARN("Current descriptor[T-%d][V-%d] cannot be interprete.\n",
 		  vb_desc->type, vb_desc->ver);
 	return false;
 }
@@ -644,6 +651,8 @@ static bool vbios_create_connector_resource(struct loonggpu_vbios *vbios, void *
 	memcpy(connector->internal_edid, vb_connector.internal_edid, 256);
 	if (connector->feature >= 1)
 		connector->multi_interface = vb_connector.multi_interface;
+	else
+		connector->multi_interface = false;
 
 	list_add_tail(&connector->base.node, &vbios->resource_list);
 
@@ -689,7 +698,7 @@ static bool vbios_create_pwm_resource(struct loonggpu_vbios *vbios, void *data, 
 {
 	struct pwm_resource *pwm_resource;
 	struct vbios_pwm vb_pwm;
-	u32 pwm_size;
+	u32 pwm_size, index;
 
 	if (IS_ERR_OR_NULL(vbios) || IS_ERR_OR_NULL(data))
 		return false;
@@ -697,6 +706,7 @@ static bool vbios_create_pwm_resource(struct loonggpu_vbios *vbios, void *data, 
 	pwm_resource = kvmalloc(sizeof(*pwm_resource), GFP_KERNEL);
 	if (IS_ERR_OR_NULL(pwm_resource))
 		return false;
+	memset(pwm_resource, 0, sizeof(*pwm_resource));
 
 	pwm_size = sizeof(struct vbios_pwm);
 	memset(&vb_pwm, VBIOS_DATA_INVAL, pwm_size);
@@ -709,6 +719,18 @@ static bool vbios_create_pwm_resource(struct loonggpu_vbios *vbios, void *data, 
 	pwm_resource->pwm = vb_pwm.pwm;
 	pwm_resource->polarity = vb_pwm.polarity;
 	pwm_resource->peroid = vb_pwm.peroid;
+
+	if (pwm_resource->feature >= 2) {
+		/* Ensure that the count data is valid */
+		if (vb_pwm.light.level_count && vb_pwm.light.level_count <= PWM_LIGHT_TABLES_MAX) {
+			pwm_resource->light.used = vb_pwm.light.used;
+			pwm_resource->light.level_count = vb_pwm.light.level_count;
+			for (index = 0; index < vb_pwm.light.level_count; index++) {
+				pwm_resource->light.tables[index].level = vb_pwm.light.tables[index].level;
+				pwm_resource->light.tables[index].duty = vb_pwm.light.tables[index].duty;
+			}
+		}
+	}
 
 	list_add_tail(&pwm_resource->base.node, &vbios->resource_list);
 
@@ -817,6 +839,9 @@ static bool vbios_create_panel_resource(struct loonggpu_vbios *vbios, void *data
 		panel_resource->timing[index].hdisplay = vb_panel.timing[index].hdisplay;
 		panel_resource->timing[index].vdisplay = vb_panel.timing[index].vdisplay;
 	}
+
+	if (panel_resource->feature >= 1)
+		panel_resource->max_pixclk = vb_panel.max_pixclk;
 
 	list_add_tail(&panel_resource->base.node, &vbios->resource_list);
 
@@ -1734,6 +1759,11 @@ acpi:
 		if (!vbios_ptr)
 			goto sysconf;
 
+		if (!pfn_valid(PFN_DOWN(viat->vbios_addr))) {
+			kfree(vbios_ptr);
+			goto sysconf;
+		}
+
 		vaddr = phys_to_virt(viat->vbios_addr);
 		memcpy(vbios_ptr, vaddr, VBIOS_SIZE);
 
@@ -1748,6 +1778,8 @@ sysconf:
 	if (!get_vbios) {
 	#if defined(LG_LOONGSON_SYS_CONF_HAS_VGABIOS_ADDR)
 		if (!loongson_sysconf.vgabios_addr)
+			return false;
+		else if(!virt_addr_valid((void *)loongson_sysconf.vgabios_addr))
 			return false;
 	#else
 		return false;
@@ -1791,10 +1823,13 @@ sysconf:
 		case ENCODER_CHIP_ID_INTERNAL_HDMI:
 		case ENCODER_CHIP_ID_INTERNAL_EDP:
 		case ENCODER_CHIP_ID_INTERNAL_DP:
+		case ENCODER_CHIP_ID_INTERNAL_COMPOSITE:
 		case ENCODER_CHIP_ID_EDP_LT9721:
 		case ENCODER_CHIP_ID_EDP_LT6711:
 		case ENCODER_CHIP_ID_LVDS_LT8619:
 		case ENCODER_CHIP_ID_EDP_NCS8805:
+		case ENCODER_CHIP_ID_EDP_ICNM7601:
+		case ENCODER_CHIP_ID_EDP_CS5611AQ_S:
 		case ENCODER_CHIP_ID_DP_LT8718:
 		case ENCODER_CHIP_ID_HDMI_LT8618:
 		case ENCODER_CHIP_ID_HDMI_IT66121:

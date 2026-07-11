@@ -10,72 +10,170 @@
 #include "loonggpu_helper.h"
 
 #define DEBUG_FILTERED_MODES 0
+extern bool hotplug_event_flag;
 
-u16 drm_get_product_code(const struct edid *edid)
+static bool is_special_hdmi_connector(int connector_type)
 {
-    if (!edid) {
-		DRM_INFO( "edid is NULL \n");
-		return -1;
-    }
+	size_t i;
 
-   return ((uint16_t)edid->prod_code[1] << 8) |
-                    (uint16_t)edid->prod_code[0];
+	static const int special_connectors[] = {
+		DRM_MODE_CONNECTOR_HDMIA,
+		DRM_MODE_CONNECTOR_Composite,
+	};
+
+	for (i = 0; i < ARRAY_SIZE(special_connectors); i++) {
+		if (connector_type == special_connectors[i])
+			return true;
+	}
+
+	return false;
+}
+
+static bool is_audio_supported_connector(int connector_type)
+{
+	size_t i;
+
+	static const int audio_connectors[] = {
+		DRM_MODE_CONNECTOR_HDMIA,
+		DRM_MODE_CONNECTOR_eDP,
+		DRM_MODE_CONNECTOR_Composite,
+	};
+
+	for (i = 0; i < ARRAY_SIZE(audio_connectors); i++) {
+		if (connector_type == audio_connectors[i])
+			return true;
+	}
+
+	return false;
 }
 
 const char *drm_get_edid_manufacturer(const struct edid *edid)
 {
-    char mfg[3];
+	char mfg[3];
 
-    mfg[0] = ((edid->mfg_id[0] >> 2) & 0x1f) + 'A' - 1;
-    mfg[1] = (((edid->mfg_id[0] & 0x03) << 3) |
-              ((edid->mfg_id[1] >> 5) & 0x07)) + 'A' - 1;
-    mfg[2] = (edid->mfg_id[1] & 0x1f) + 'A' - 1;
+	if (!edid) {
+	DRM_INFO("edid is null \n");
+	return NULL;
+	}
 
-    return kasprintf(GFP_KERNEL, "%c%c%c", mfg[0], mfg[1], mfg[2]);
+	mfg[0] = ((edid->mfg_id[0] >> 2) & 0x1f) + 'A' - 1;
+	mfg[1] = (((edid->mfg_id[0] & 0x03) << 3) |
+				((edid->mfg_id[1] >> 5) & 0x07)) + 'A' - 1;
+	mfg[2] = (edid->mfg_id[1] & 0x1f) + 'A' - 1;
+
+	return kasprintf(GFP_KERNEL, "%c%c%c", mfg[0], mfg[1], mfg[2]);
 }
 
-bool is_eat_special_display(const struct edid *edid)
+void fix_monitor_offset(struct loonggpu_device *adev, u32 link)
 {
-    const char *manufacturer;
-    u16 product_code;
-    u32 serial;
+	u32 vsync = 0;
 
-    if (!edid)
-        return false;
-
-    manufacturer = drm_get_edid_manufacturer(edid);
-    if (!manufacturer)
-        return false;
-
-    if (strncmp(manufacturer, "EAT", 3) != 0)
-        return false;
-
-    product_code = drm_get_product_code(edid);
-    serial = edid->serial;
-
-    return (product_code == 9984 && serial == 1);
+	vsync = dc_readl(adev, gdc_reg->crtc_reg[link].vsync);
+	msleep(300);
+	vsync = (vsync & ~0x7FF) | (((vsync & 0x7FF) + 1) & 0x7FF);
+	dc_writel(adev, gdc_reg->crtc_reg[link].vsync, vsync);
 }
 
-bool is_hpn_special_display(const struct edid *edid)
+void fix_vsc_missing_display(struct loonggpu_device *adev, u32 link)
 {
-    const char *manufacturer;
-    u16 product_code;
-    u32 serial;
+	u32 reg_val;
 
-    if (!edid)
-        return false;
+	switch (adev->chip) {
+	case dev_7a2000:
+	case dev_2k2000:
+		reg_val = dc_readl(adev, gdc_reg->hdmi_reg_v1[link].ctrl);
+		reg_val &= ~(1 << 1);
+		reg_val |= (1 << 3);
+		dc_writel(adev, gdc_reg->hdmi_reg_v1[link].ctrl, reg_val);
+		break;
+	case dev_2k3000:
+		reg_val = dc_readl(adev, gdc_reg->hdmi_reg_v2[0].ctrl);
+		reg_val &= ~(1 << 1);
+		reg_val |= (1 << 3);
+		dc_writel(adev, gdc_reg->hdmi_reg_v2[0].ctrl, reg_val);
+		break;
+	}
+}
 
-    manufacturer = drm_get_edid_manufacturer(edid);
-    if (!manufacturer)
-        return false;
+static const struct special_display special_displays[] = {
+	{
+		.manufacturer = "EAT",
+		.product_code = 9984,
+		.serial = 1,
+		.sd_func = fix_monitor_offset,
+	},
+	{
+		.manufacturer = "HPN",
+		.product_code = 14467,
+		.serial = 2,
+		.sd_func = fix_monitor_offset,
+	},
+	{
+		.manufacturer = "HKC",
+		.product_code = 10009,
+		.serial = 1,
+		.sd_func = fix_monitor_offset,
+	},
+	{
+		.manufacturer = "HKC",
+		.product_code = 2719,
+		.serial = 1,
+		.sd_func = fix_monitor_offset,
+	},
+	{
+		.manufacturer = "VSC",
+		.product_code = 14882,
+		.serial = 16843009,
+		.sd_func = fix_vsc_missing_display,
+	},
+};
 
-    if (strncmp(manufacturer, "HPN", 3) != 0)
-        return false;
+void is_special_display(struct loonggpu_device *adev, struct loonggpu_connector *aconnector, u32 link)
+{
+	struct edid *edid = NULL;
+	const char *manufacturer;
+	u16 product_code = 0;
+	int connector_type;
+	int i;
 
-    product_code = drm_get_product_code(edid);
-    serial = edid->serial;
+	connector_type = aconnector->base.connector_type;
+	if (!is_special_hdmi_connector(connector_type))
+		return;
 
-    return (product_code == 14467 && serial == 2);
+	if (!aconnector || !(aconnector->base.edid_blob_ptr) || !(aconnector->base.edid_blob_ptr->data))
+		return;
+
+	edid = (struct edid *)aconnector->base.edid_blob_ptr->data;
+	manufacturer = drm_get_edid_manufacturer(edid);
+	if (!manufacturer) {
+		DRM_INFO("manufacturer is null \n");
+		return;
+	}
+
+	product_code = EDID_PRODUCT_ID(edid);
+	if (!product_code) {
+		DRM_INFO("product code is null \n");
+		return;
+	}
+
+	for (i = 0; special_displays[i].manufacturer != NULL; i++) {
+		const struct special_display *sd = &special_displays[i];
+		if (strncmp(manufacturer, sd->manufacturer, 3) != 0)
+			continue;
+
+		if (product_code != sd->product_code)
+			continue;
+
+		if (edid->serial != sd->serial)
+			continue;
+
+		if (sd->sd_func) {
+			sd->sd_func(adev, link);
+			return;
+		}
+	}
+
+	return;
 }
 
 /**
@@ -95,7 +193,7 @@ int check_hdmi_audio(struct loonggpu_device *adev, struct drm_connector *connect
 
 	/* This function must be called under i2c_method condition, where some notebook use eDP transferred
 	 * from hdmi interface to connect display. So we count on it here. */
-	if ((connector->connector_type != DRM_MODE_CONNECTOR_HDMIA) && (connector->connector_type != DRM_MODE_CONNECTOR_eDP)) {
+	if (!is_audio_supported_connector(connector->connector_type)) {
 		DRM_DEBUG("This monitor does not support audio. \n");
 		return -EINVAL;
 	}
@@ -114,8 +212,33 @@ int check_hdmi_audio(struct loonggpu_device *adev, struct drm_connector *connect
 	return 0;
 }
 
+static void destroy_virtual_connector(struct drm_connector *connector)
+{
+	struct loonggpu_connector *lconnector = to_loonggpu_connector(connector);
+	drm_connector_unregister(connector);
+	drm_connector_cleanup(connector);
+	kfree(lconnector);
+}
+
+static enum drm_connector_status
+loonggpu_virtual_connector_detect(struct drm_connector *connector, bool force)
+{
+	return connector_status_disconnected;
+}
+
+static int loonggpu_virtual_connector_get_modes(struct drm_connector *connector)
+{
+	return 0;
+}
+
+static struct drm_connector_helper_funcs virtual_connector_helper_funcs = {
+	.get_modes = loonggpu_virtual_connector_get_modes,
+};
+
 static const struct drm_connector_funcs virtual_connector_funcs = {
-	.destroy = drm_connector_cleanup,
+	.destroy = destroy_virtual_connector,
+	.detect = loonggpu_virtual_connector_detect,
+	.fill_modes = drm_helper_probe_single_connector_modes,
 	.reset = drm_atomic_helper_connector_reset,
 	.atomic_duplicate_state = drm_atomic_helper_connector_duplicate_state,
 	.atomic_destroy_state = drm_atomic_helper_connector_destroy_state,
@@ -134,47 +257,32 @@ static const struct drm_connector_funcs virtual_connector_funcs = {
  */
 struct drm_connector *create_virtual_connector(struct drm_device *dev)
 {
-	struct drm_connector *connector;
+	struct loonggpu_device *adev = dev->dev_private;
+	struct loonggpu_connector *lconnector;
 	int ret;
 
+	if (adev->mode_info.dp_connector)
+		return &adev->mode_info.dp_connector->base;
+
 	/* Allocate connector memory */
-	connector = kzalloc(sizeof(*connector), GFP_KERNEL);
-	if (!connector)
+	lconnector = kzalloc(sizeof(*lconnector), GFP_KERNEL);
+	if (!lconnector)
 		return ERR_PTR(-ENOMEM);
 
 	/* Initialize DRM connector */
-	ret = drm_connector_init(dev, connector, &virtual_connector_funcs,
+	ret = drm_connector_init(dev, &lconnector->base, &virtual_connector_funcs,
                            DRM_MODE_CONNECTOR_VIRTUAL);
-
 	if (ret) {
 		DRM_ERROR("Failed to initialize virtual connector: %d\n", ret);
-		kfree(connector);
+		kfree(lconnector);
 		return ERR_PTR(ret);
 	}
 
-	return connector;
-}
+	adev->mode_info.dp_connector = lconnector;
 
-/**
- * destroy_virtual_connector - Safely destroy a virtual connector
- * @connector: Pointer to the connector to be destroyed
- *
- * This function safely cleans up connector resources, including checking the
- * connector state and correctly handling null pointers.
- */
-void destroy_virtual_connector(struct drm_connector *connector)
-{
-	if (!connector) {
-		DRM_DEBUG("Attempted to destroy NULL connector\n");
-		return;
-	}
+	drm_connector_helper_add(&lconnector->base, &virtual_connector_helper_funcs);
 
-	/* Only fully initialized connectors require DRM cleanup */
-	if (connector->dev) {
-		drm_connector_cleanup(connector);
-	}
-
-	kfree(connector);
+	return &lconnector->base;
 }
 
 /**
@@ -493,11 +601,7 @@ int loonggpu_dc_get_modes(struct loonggpu_bridge_phy *phy, int used_method,
 {
 	struct loonggpu_device *adev = connector->dev->dev_private;
 	struct loonggpu_bridge_phy *internal_bp = phy->res->internal_bp;
-	struct loonggpu_connector *aconnector;
 	unsigned int count = 0;
-
-	aconnector = to_loonggpu_connector(connector);
-	aconnector->special_display = false;
 
 	switch (used_method) {
 	case via_i2c:
@@ -505,9 +609,6 @@ int loonggpu_dc_get_modes(struct loonggpu_bridge_phy *phy, int used_method,
 			edid = drm_get_edid(connector, &phy->li2c->adapter);
 
 		if (edid) {
-			if (is_hpn_special_display(edid) || is_eat_special_display(edid))
-				aconnector->special_display = true;
-
 			drm_connector_update_edid_property(connector, edid);
 			check_hdmi_audio(adev, connector, edid);
 			count = drm_add_edid_modes(connector, edid);
@@ -581,13 +682,21 @@ bool is_resolution_valid(struct panel_resource *panel_resource, struct drm_displ
 
 	vrefresh = drm_mode_vrefresh(mode);
 
-	if (mode->hdisplay > panel_resource->max_hdisplay &&    \
-					mode->vdisplay > panel_resource->max_vdisplay)
-			return true;
-	else if (mode->hdisplay == panel_resource->max_hdisplay &&      \
-					mode->vdisplay == panel_resource->max_vdisplay) {
-			if (vrefresh > panel_resource->max_vrefresh)
+	if (!panel_resource->feature) {
+		if (panel_resource->max_hdisplay && panel_resource->max_vrefresh) {
+			if (mode->hdisplay > panel_resource->max_hdisplay &&    \
+				mode->vdisplay > panel_resource->max_vdisplay)
+				return true;
+			else if (mode->hdisplay == panel_resource->max_hdisplay &&      \
+				mode->vdisplay == panel_resource->max_vdisplay) {
+				if (vrefresh > panel_resource->max_vrefresh)
 					return true;
+			}
+		}
+	} else {
+		if (mode->clock > panel_resource->max_pixclk &&  \
+			panel_resource->max_pixclk)
+			return true;
 	}
 
 	for (index = 0; index < panel_resource->count; index++) {
@@ -681,6 +790,9 @@ bridge_phy_connector_detect(struct drm_connector *connector, bool force)
 	struct loonggpu_bridge_phy *phy = adev->mode_info.encoders[connector->index]->bridge;
 	struct loonggpu_bridge_phy *internal_bp = phy->res->internal_bp;
 
+	if (hotplug_event_flag)
+		return connector_status_disconnected;
+
 	if (internal_bp->hpd_funcs && internal_bp->hpd_funcs->get_connect_status)
 		status = internal_bp->hpd_funcs->get_connect_status(phy);
 
@@ -724,7 +836,7 @@ static const struct drm_connector_funcs bridge_phy_connector_funcs = {
 	.reset = drm_atomic_helper_connector_reset,
 	.atomic_duplicate_state = drm_atomic_helper_connector_duplicate_state,
 	.atomic_destroy_state = drm_atomic_helper_connector_destroy_state,
-	.late_register = loonggpu_backlight_register
+	.late_register = loonggpu_late_register
 };
 
 /**
@@ -927,6 +1039,8 @@ static char *get_encoder_chip_name(int encoder_obj)
 		return "hdmi";
 	case ENCODER_CHIP_ID_EDP_TRANSPARENT:
 	case ENCODER_CHIP_ID_INTERNAL_EDP:
+	case ENCODER_CHIP_ID_EDP_CS5611AQ_S:
+	case ENCODER_CHIP_ID_EDP_ICNM7601:
 		return "edp";
 	case ENCODER_CHIP_ID_INTERNAL_DP:
 		return "dp";
@@ -936,6 +1050,8 @@ static char *get_encoder_chip_name(int encoder_obj)
 		return "it66121";
 	case ENCODER_CHIP_ID_HDMI_MS7210:
 		return "ms7210";
+	case ENCODER_CHIP_ID_INTERNAL_COMPOSITE:
+		return "composite";
 	default:
 		DRM_WARN("No ext encoder chip 0x%x.\n", encoder_obj);
 		return "Unknown";
@@ -1189,11 +1305,14 @@ static int bridge_phy_encoder_obj_select(struct loonggpu_dc_bridge *dc_bridge)
 	case ENCODER_CHIP_ID_INTERNAL_DVO:
 	case ENCODER_CHIP_ID_INTERNAL_HDMI:
 	case ENCODER_CHIP_ID_INTERNAL_EDP:
+	case ENCODER_CHIP_ID_EDP_CS5611AQ_S:
 	case ENCODER_CHIP_ID_INTERNAL_DP:
 	case ENCODER_CHIP_ID_NONE:
 	case ENCODER_CHIP_ID_VGA_TRANSPARENT:
 	case ENCODER_CHIP_ID_HDMI_TRANSPARENT:
 	case ENCODER_CHIP_ID_EDP_TRANSPARENT:
+	case ENCODER_CHIP_ID_INTERNAL_COMPOSITE:
+	case ENCODER_CHIP_ID_EDP_ICNM7601:
 		ret = bridge_phy_internal_init(dc_bridge);
 		break;
 	default:

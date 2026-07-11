@@ -27,6 +27,19 @@
 #define LOONGGPU_MMU_VMID_OF_PGD(vmid)   \
 			     (LOONGGPU_MMU_PGD_LO_OFFSET + ((vmid) * LOONGGPU_MMU_PGD_REG_SIZE))
 
+#ifdef LG_VM_PAGE_SIZE_4K
+#define LOONGGPU_MMU_DIR_CTRL_256M_1LVL  ((14 << 26 | 0 << 20) | \
+						(14 << 16 | 0 << 10) | \
+						(15 <<  6 | 12 <<  0))
+
+#define LOONGGPU_MMU_DIR_CTRL_512M_1LVL  LOONGGPU_MMU_DIR_CTRL_256M_1LVL
+
+#define LOONGGPU_MMU_DIR_CTRL_1T_3LVL  ((10 << 26 | 30 << 20) | \
+						(9 << 16 | 21 << 10) | \
+						(9 <<  6 | 12 <<  0))
+#endif
+
+#ifdef LG_VM_PAGE_SIZE_16K
 #define LOONGGPU_MMU_DIR_CTRL_256M_1LVL  ((14 << 26 | 0 << 20) | \
 						(14 << 16 | 0 << 10) | \
 						(14 <<  6 | 14 <<  0))
@@ -38,6 +51,7 @@
 #define LOONGGPU_MMU_DIR_CTRL_1T_3LVL  ((4 << 26 | 36 << 20) | \
 						(11 << 16 | 25 << 10) | \
 						(11 <<  6 | 14 <<  0))
+#endif
 
 #define LOONGGPU_MMU_FLUSH_DOMAIN_SHIFT 	8
 #define LOONGGPU_MMU_FLUSH_EN 				BIT(0)

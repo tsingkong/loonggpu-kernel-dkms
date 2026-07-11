@@ -71,7 +71,8 @@ struct dc_timing_info {
 	u32 stride;
 	u32 depth;
 	u32 use_dma;
-	u32 fixed_vsync_width; /*vsync_width = vsync_end - vsync_start*/
+	u32 fixed_vsync_start;
+	u32 fixed_vsync_end;
 };
 
 struct dc_sw_ops {

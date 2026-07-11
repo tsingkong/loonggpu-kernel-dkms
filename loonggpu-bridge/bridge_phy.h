@@ -22,6 +22,13 @@
 
 struct loonggpu_bridge_phy;
 
+struct special_display {
+    const char *manufacturer;
+    u16 product_code;
+    u32 serial;
+    void (*sd_func)(struct loonggpu_device *adev, u32 link);
+};
+
 struct loonggpu_dc_bridge {
 	struct loonggpu_device *adev;
 	struct loonggpu_bridge_phy *internal_bp;
@@ -278,7 +285,6 @@ int drm_connector_edid_intersection(struct drm_connector *actual_connector,
                                   struct drm_connector *virtual_connector);
 
 struct drm_connector *create_virtual_connector(struct drm_device *dev);
-void destroy_virtual_connector(struct drm_connector *connector);
 
 void bridge_phy_mode_set(struct loonggpu_bridge_phy *phy,
 				struct drm_display_mode *mode,
@@ -301,10 +307,8 @@ int bridge_phy_it66121_remove(struct loonggpu_bridge_phy *phy);
 int bridge_phy_ms7210_init(struct loonggpu_dc_bridge *dc_bridge);
 int bridge_phy_ms7210_remove(struct loonggpu_bridge_phy *phy);
 
-u16 drm_get_product_code(const struct edid *edid);
+void is_special_display(struct loonggpu_device *adev, struct loonggpu_connector *aconnector, u32 link);
 const char *drm_get_edid_manufacturer(const struct edid *edid);;
-bool is_hpn_special_display(const struct edid *edid);
-bool is_eat_special_display(const struct edid *edid);
 
 static inline struct loonggpu_bridge_phy *lg_bridge_phy_alloc(struct loonggpu_device *adev,
 							const struct drm_bridge_funcs *bridge_funcs)

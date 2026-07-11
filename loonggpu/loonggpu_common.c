@@ -93,6 +93,9 @@ static int loonggpu_gpu_pci_config_reset(struct loonggpu_device *adev)
 static int loonggpu_reset(struct loonggpu_device *adev)
 {
 	int r;
+	if (adev->family_type == CHIP_LG200) {
+		loonggpu_cmd_exec(adev, LG2XX_ICMD32(LG2XX_ICMD32_MOP_GPIPE, LG2XX_ICMD32_SOP_GPIPE_RESET), 0, 0);
+	}
 
 	/*XXX Set pcie config regs not Need*/
 	return 0;

@@ -409,8 +409,11 @@ int loonggpu_fence_driver_init_ring(struct loonggpu_ring *ring,
 					 GFP_KERNEL);
 	if (!ring->fence_drv.fences)
 		return -ENOMEM;
-
-	timeout = msecs_to_jiffies(loonggpu_lockup_timeout);
+	if ((adev->family_type == CHIP_LG200) && (strcmp(ring->name, "gfx") == 0)) {
+		timeout = msecs_to_jiffies(loonggpu_gfx_lockup_timeout);
+	} else {
+		timeout = msecs_to_jiffies(loonggpu_lockup_timeout);
+	}
 
 	r = lg_drm_sched_init(ring, &loonggpu_sched_ops,
 			   num_hw_submission, loonggpu_job_hang_limit,
@@ -693,3 +696,21 @@ int loonggpu_debugfs_fence_init(struct loonggpu_device *adev)
 #endif
 }
 
+int loonggpu_soft_pipeline_sync(struct loonggpu_ring *ring)
+{
+	uint32_t seq_read;
+	uint32_t seq = ring->fence_drv.sync_seq;
+	uint32_t count = 0;
+
+	while (1) {
+		seq_read = loonggpu_fence_read(ring);
+		if (seq_read >= seq)
+			break;
+		usleep_range(100,200);
+		count++;
+		if (count > 10000)
+			break;
+	}
+
+	return 0;
+}

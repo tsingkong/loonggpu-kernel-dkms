@@ -52,6 +52,7 @@ int dc_crtc_get_scanoutpos(struct loonggpu_device *adev, int crtc_num, u32 *vbl,
 
 void dc_crtc_destroy(struct loonggpu_dc_crtc *crtc);
 bool dc_crtc_enable(struct loonggpu_dc_crtc *crtc, bool enable);
+bool set_screen_open(struct loonggpu_dc_crtc *dc_crtc);
 bool dc_crtc_timing_set(struct loonggpu_dc_crtc *crtc, struct dc_timing_info *timing);
 u32 dc_crtc_get_vblank_counter(struct loonggpu_dc_crtc *crtc);
 int dc_set_vblank(struct drm_crtc *crtc, bool enable);

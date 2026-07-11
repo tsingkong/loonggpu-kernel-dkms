@@ -72,6 +72,7 @@ extern int loonggpu_testing;
 extern int loonggpu_disp_priority;
 extern int loonggpu_msi;
 extern int loonggpu_lockup_timeout;
+extern int loonggpu_gfx_lockup_timeout;
 extern int loonggpu_dpm;
 extern int loonggpu_runtime_pm;
 extern int loonggpu_vm_size;
@@ -548,6 +549,7 @@ void loonggpu_fence_slab_fini(void);
 	#define LG2XX_ICMD32_SOP_GPIPE_BGQ	0x00000001
 	#define LG2XX_ICMD32_SOP_GPIPE_GQSZ	0x00000002
 	#define LG2XX_ICMD32_SOP_GPIPE_UBGQ	0x00000003
+	#define LG2XX_ICMD32_SOP_GPIPE_RESET	0x00000004
 #define LG2XX_ICMD32_MOP_BPIPE		0x00000002
 	#define LG2XX_ICMD32_SOP_BPIPE_BBQ	0x00000001
 	#define LG2XX_ICMD32_SOP_BPIPE_BQSZ	0x00000002
@@ -606,6 +608,10 @@ void loonggpu_fence_slab_fini(void);
 	#define LG2XX_ICMD32_SOP_EPIPE_BBQ      0x00000001
 	#define LG2XX_ICMD32_SOP_EPIPE_BQSZ     0x00000002
 	#define LG2XX_ICMD32_SOP_EPIPE_UBBQ     0x00000003
+#define LG2XX_ICMD32_MOP_VRAM         0x0000000e
+	#define LG2XX_ICMD32_SOP_VRAM_BINDADDR  0x00000001
+	#define LG2XX_ICMD32_SOP_VRAM_READ      0x00000002
+	#define LG2XX_ICMD32_SOP_VRAM_WRITE     0x00000003
 
 /* Stream command mode */
 #define LG2XX_SCMD32(op, cfg)				(((op) & 0xFF)  | ((cfg) & 0xFFFFFF) << 8)
@@ -618,6 +624,7 @@ void loonggpu_fence_slab_fini(void);
 #define LG2XX_SCMD32_OP_WB64				0x11 /* writeback operation */
 #define LG2XX_SCMD32_OP_ENVT				0x12
 #define LG2XX_SCMD32_OP_INTR				0x14
+#define LG2XX_SCMD32_OP_DBAR				0x16
 #define LG2XX_SCMD32_OP_IB				0x80
 #define LG2XX_SCMD32_OP_WREG				0x81
 #define LG2XX_SCMD32_OP_POLL				0x83
@@ -1368,6 +1375,8 @@ struct loonggpu_device {
 	void __iomem			*loongson_dc_rmmio;
 	void __iomem			*io_base;
 
+	/* loongson hdmi hda mmio */
+	void __iomem			*loongson_hdmi_hda_rmmio;
 	/* protects concurrent MM_INDEX/DATA based register access */
 	spinlock_t mmio_idx_lock;
 	spinlock_t dc_mmio_lock;
@@ -1769,4 +1778,6 @@ enum loonggpu_ib_pool_type {
 };
 
 #include "loonggpu_object.h"
+
+int loonggpu_soft_pipeline_sync(struct loonggpu_ring *ring);
 #endif

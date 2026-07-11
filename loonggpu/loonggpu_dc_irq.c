@@ -7,12 +7,36 @@
 #include "loonggpu_dc_i2c.h"
 #include "loonggpu_dc_interface.h"
 #include "loonggpu_dc_dp.h"
+#include "linux/delay.h"
 
 #define DM_IRQ_TABLE_LOCK(adev, flags) \
 	spin_lock_irqsave(&adev->dc->irq_handler_list_table_lock, flags)
 
 #define DM_IRQ_TABLE_UNLOCK(adev, flags) \
 	spin_unlock_irqrestore(&adev->dc->irq_handler_list_table_lock, flags)
+
+bool hotplug_event_flag = false;
+
+static bool connector_hw_status(struct loonggpu_dc_crtc *crtc)
+{
+	int i;
+	int hdmi_status = 0, dp_status = 0;
+
+	for (i = 0; i < crtc->interfaces; i++) {
+		switch (crtc->intf[i].type) {
+		case INTERFACE_HDMI:
+			hdmi_status = crtc->intf[i].connected;
+			break;
+		case INTERFACE_DP:
+			dp_status = crtc->intf[i].connected;
+			break;
+		default:
+			DRM_INFO("No hdmi & dp interface\n");
+			break;
+		}
+	}
+	return hdmi_status & dp_status;
+}
 
 static void dc_handle_hpd_irq(void *param)
 {
@@ -30,6 +54,12 @@ static void dc_handle_hpd_irq(void *param)
 	mutex_lock(&aconnector->hpd_lock);
 
 	if (dc_interface_status_changed(connector, dc_crtc)) {
+		if (connector_hw_status(dc_crtc) && connector->index == 1) {
+			hotplug_event_flag = true;
+			drm_kms_helper_hotplug_event(dev);
+			msleep(200);
+			hotplug_event_flag = false;
+		}
 		drm_kms_helper_hotplug_event(dev);
 	}
 

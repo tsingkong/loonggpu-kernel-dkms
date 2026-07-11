@@ -558,11 +558,23 @@ static void xdma_vm_set_pte_pde(struct loonggpu_ib *ib, u64 pe,
 	 * 16K pf : 3 << 28
 	 * */
 	if (adev->family_type == CHIP_LG100)
+#ifdef LG_VM_PAGE_SIZE_4K
+		ib->ptr[ib->length_dw++] = GSPKT(GSPKT_XDMA_COPY, 8) | (0x7 << 24) | (1 << 8) | (1 << 28);
+#endif
+
+#ifdef LG_VM_PAGE_SIZE_16K
 		ib->ptr[ib->length_dw++] = GSPKT(GSPKT_XDMA_COPY, 8) | (0x7 << 24) | (1 << 8) | (3 << 28);
+#endif
 	else if (adev->family_type == CHIP_LG200 ||
 		 adev->family_type == CHIP_LG210) {
 		ib->ptr[ib->length_dw++] = LG2XX_SCMD32(LG2XX_SCMD32_OP_STSCFG, 0) | (8 << 20);
+#ifdef LG_VM_PAGE_SIZE_4K
+		ib->ptr[ib->length_dw++] = (1 << 0 | 7 << 8 | 1 << 26);
+#endif
+
+#ifdef LG_VM_PAGE_SIZE_16K
 		ib->ptr[ib->length_dw++] = (1 << 0 | 7 << 8 | 3 << 26);
+#endif
 	}
 	else
 		DRM_ERROR("%s Illegal Family type %d\n", __FUNCTION__, adev->family_type);
@@ -711,7 +723,13 @@ static int xdma_set_pte_pde_test(struct loonggpu_ring *ring, long timeout)
 		goto bo_free;
 	}
 
+#ifdef LG_VM_PAGE_SIZE_4K
+	xdma_vm_set_pte_pde(&ib, gpu_addr, 0, 512, 8, 0);
+#endif
+
+#ifdef LG_VM_PAGE_SIZE_16K
 	xdma_vm_set_pte_pde(&ib, gpu_addr, 0, 2048, 8, 0);
+#endif
 	xdma_ring_pad_ib(ring, &ib);
 
 	r = loonggpu_ib_schedule(ring, 1, &ib, NULL, &f);
@@ -802,8 +820,13 @@ static int xdma_copy_pte_test(struct loonggpu_ring *ring, long timeout)
 		DRM_ERROR("xdma_copy_pte_test : loonggpu_ib_get error\r\n");
 		goto bo_free_gtt;
 	}
+#ifdef LG_VM_PAGE_SIZE_4K
+	xdma_vm_copy_pte(&ib, gpu_addr, gpu_addr_gtt, 512);
+#endif
 
+#ifdef LG_VM_PAGE_SIZE_16K
 	xdma_vm_copy_pte(&ib, gpu_addr, gpu_addr_gtt, 2048);
+#endif
 	xdma_ring_pad_ib(ring, &ib);
 
 	r = loonggpu_ib_schedule(ring, 1, &ib, NULL, &f);
@@ -1069,6 +1092,11 @@ static void xdma_set_ring_funcs(struct loonggpu_device *adev)
 	case CHIP_LG200:
 	case CHIP_LG210:
 		xdma_ring_funcs.nop = LG2XX_SCMD32(LG2XX_SCMD32_OP_NOP, 0);
+		xdma_ring_funcs.emit_frame_size =
+			3 + /* hdp invalidate */
+			6 + /* xdma_ring_emit_pipeline_sync */
+			VI_FLUSH_GPU_TLB_NUM_WREG * 3 + 6 + /* xdma_ring_emit_vm_flush */
+			6 + 6 + 6; /* xdma_ring_emit_fence x3 for user fence, vm fence */
 		break;
 	default:
 		DRM_ERROR("%s Illegal Family type %d\n", __FUNCTION__, adev->family_type);

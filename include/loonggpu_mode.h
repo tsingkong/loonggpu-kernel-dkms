@@ -138,7 +138,6 @@ struct loonggpu_connector {
 	enum dc_irq_source irq_source_i2c;
 	enum dc_irq_source irq_source_hpd[MAX_DC_INTERFACES];
 	enum dc_irq_source irq_source_vga_hpd;
-	bool special_display;
 };
 
 struct loonggpu_mode_info {
@@ -148,6 +147,7 @@ struct loonggpu_mode_info {
 	struct loonggpu_connector *connectors[4];
 	struct loonggpu_encoder *encoders[4];
 	struct loonggpu_backlight *backlights[2];
+	struct loonggpu_connector *dp_connector;
 	/* underscan */
 	struct drm_property *underscan_property;
 	struct drm_property *underscan_hborder_property;

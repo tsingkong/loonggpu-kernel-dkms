@@ -400,7 +400,15 @@ void loonggpu_device_gart_location(struct loonggpu_device *adev,
 	}
 
 	mc->gart_start = 0;
+
+#ifdef LG_VM_PAGE_SIZE_4K
+	/* HW limit 128MB virtual address when using 1 level page-table */
+	mc->gart_size = 128ULL << 20;
+#endif
+
+#ifdef LG_VM_PAGE_SIZE_16K
 	mc->gart_size = 256ULL << 20;
+#endif
 
 	mc->gart_end = mc->gart_start + mc->gart_size - 1;
 	dev_info(adev->dev, "GART: %lluM 0x%016llX - 0x%016llX\n",
@@ -613,6 +621,11 @@ static void loonggpu_device_check_arguments(struct loonggpu_device *adev)
 	if (loonggpu_lockup_timeout == 0) {
 		dev_warn(adev->dev, "lockup_timeout msut be > 0, adjusting to 10000\n");
 		loonggpu_lockup_timeout = 10000;
+	}
+
+	if (loonggpu_gfx_lockup_timeout == 0) {
+		dev_warn(adev->dev, "gfx_lockup_timeout msut be > 0, adjusting to 2000\n");
+		loonggpu_gfx_lockup_timeout = 2000;
 	}
 }
 
@@ -2279,14 +2292,20 @@ int loonggpu_device_gpu_recover(struct loonggpu_device *adev,
 
 		if (job && job->base.sched == &ring->sched)
 			continue;
+		if (adev->family_type != CHIP_LG200) {
+			lg_drm_sched_stop(&ring->sched, job ? &job->base : NULL);
 
-		lg_drm_sched_stop(&ring->sched, job ? &job->base : NULL);
-
-		/* after all hw jobs are reset, hw fence is meaningless, so force_completion */
-		loonggpu_fence_driver_force_completion(ring);
+			/* after all hw jobs are reset, hw fence is meaningless, so force_completion */
+			loonggpu_fence_driver_force_completion(ring);
+		}
 	}
 
-	r = loonggpu_device_reset(adev);
+	if (adev->family_type == CHIP_LG200) {
+		if(strcmp(job->base.sched->name, "gfx") == 0)
+			r = loonggpu_asic_reset(adev);
+	} else {
+		r = loonggpu_device_reset(adev);
+	}
 
 	for (i = 0; i < LOONGGPU_MAX_RINGS; ++i) {
 		struct loonggpu_ring *ring = adev->rings[i];

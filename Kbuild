@@ -140,7 +140,7 @@ endif
 # generate the appropriate header files.
 #
 
-CC ?= cc
+CC ?= $(LG_CC)
 LD ?= ld
 
 LG_CONFTEST_SCRIPT := $(src)/conftest.sh

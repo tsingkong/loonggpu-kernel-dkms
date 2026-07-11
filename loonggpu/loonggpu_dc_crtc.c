@@ -12,6 +12,7 @@
 #include "loonggpu_helper.h"
 #include "loonggpu_dc_dp.h"
 #include "loonggpu_bpipe.h"
+#include "bridge_phy.h"
 
 static unsigned int
 cal_freq(unsigned int pixclock_khz, struct pixel_clock *pll_config)
@@ -218,6 +219,7 @@ bool dc_crtc_timing_set(struct loonggpu_dc_crtc *crtc, struct dc_timing_info *ti
 	u32 vdisplay, cur_vdisplay;
 	u32 vsync, cur_vsync;
 	u32 panel_cfg, cur_panel_cfg;
+	u32 fixed_vsync_start = 0;
 	u32 fixed_vsync_end = 0;
 
 	if (IS_ERR_OR_NULL(crtc) || IS_ERR_OR_NULL(timing))
@@ -337,7 +339,12 @@ bool dc_crtc_timing_set(struct loonggpu_dc_crtc *crtc, struct dc_timing_info *ti
 	dc_writel(adev, gdc_reg->crtc_reg[link].panelcfg, panel_cfg);
 	dc_writel(adev, gdc_reg->crtc_reg[link].paneltim, 0);
 
-	if (crtc->timing->clock != timing->clock ||
+	if (cur_hdisplay != hdisplay ||
+		cur_vdisplay != vdisplay ||
+		cur_hsync != hsync ||
+		crtc->timing->vsync_start != timing->vsync_start ||
+		crtc->timing->vsync_end != timing->vsync_end ||
+		crtc->timing->clock != timing->clock ||
 		crtc->timing->vrefresh != timing->vrefresh) {
 		if (dc->hw_ops->dc_pll_set(crtc, timing))
 			memcpy(crtc->timing, timing, sizeof(struct dc_timing_info));
@@ -348,8 +355,10 @@ bool dc_crtc_timing_set(struct loonggpu_dc_crtc *crtc, struct dc_timing_info *ti
 		This is resolved by adjusting the vsync_end value. This workaround is
 		limited to EDP interfaces.
 	*/
-	if (crtc->timing->fixed_vsync_width && !link) {
-		fixed_vsync_end = crtc->timing->vsync_start + crtc->timing->fixed_vsync_width;
+	if (crtc->timing->fixed_vsync_end && !link) {
+		fixed_vsync_start = crtc->timing->fixed_vsync_start;
+		fixed_vsync_end = crtc->timing->fixed_vsync_end;
+		vsync = (vsync & ~(0xFFF)) | ((fixed_vsync_start & 0xFFF));
 		vsync = (vsync & ~(0xFFF << 16)) | ((fixed_vsync_end & 0xFFF) << 16);
 		dc_writel(adev, gdc_reg->crtc_reg[link].vsync, vsync);
 	}
@@ -359,11 +368,7 @@ bool dc_crtc_timing_set(struct loonggpu_dc_crtc *crtc, struct dc_timing_info *ti
 		To address display corruption (offset) issues on certain HP and PanSheng monitors
 		when using HDMI, implement a software workaround for this hardware-specific problem.
 	*/
-	if (aconnector->special_display) {
-		msleep(300);
-		vsync = (vsync & ~0x7FF) | (((vsync & 0x7FF) + 1) & 0x7FF);
-		dc_writel(adev, gdc_reg->crtc_reg[link].vsync, vsync);
-	}
+	is_special_display(adev, aconnector, link);
 
 	value = dc_readl(adev, gdc_reg->crtc_reg[link].cfg);
 	if (value & 0x1000000)
@@ -381,7 +386,9 @@ bool dc_crtc_enable(struct loonggpu_dc_crtc *dc_crtc, bool enable)
 	u32 crtc_id;
 	struct loonggpu_connector *lconnector;
 	struct drm_connector *connector;
+	int connector_type;
 	int i;
+
 
 	if (IS_ERR_OR_NULL(dc_crtc))
 		return false;
@@ -427,6 +434,11 @@ bool dc_crtc_enable(struct loonggpu_dc_crtc *dc_crtc, bool enable)
 		dc_writel(adev, gdc_reg->crtc_reg[crtc_id].vsync, vsync_val);
 	}
 
+	/* The lg_loongson_screen_state is combined with the kernel frequency driver
+	 * to achieve the long-idle function.
+	 * When all the screens are in the disable state, they should be set to enter
+	 * the long-idle state (false); otherwise, they should be set to exit
+	 * the long-idle state (true). */
 	for (i = 0; i < dc_crtc->dc->links; i++) {
 		lconnector = adev->mode_info.connectors[i];
 		connector = &lconnector->base;
@@ -442,8 +454,64 @@ bool dc_crtc_enable(struct loonggpu_dc_crtc *dc_crtc, bool enable)
 		lg_loongson_screen_state(false);
 
 	ls_bl = adev->mode_info.backlights[crtc_id];
+	connector_type = adev->mode_info.connectors[crtc_id]->base.connector_type;
 	if (ls_bl && ls_bl->power)
 		ls_bl->power(ls_bl, enable);
+	else if (backlight_device_get_by_type(BACKLIGHT_PLATFORM) &&
+		(connector_type == DRM_MODE_CONNECTOR_eDP ||
+		 connector_type == DRM_MODE_CONNECTOR_LVDS)) {
+		if (enable)
+			lg_turn_on_lvds();
+		else
+			lg_turn_off_lvds();
+	}
+
+	return true;
+}
+
+bool set_screen_open(struct loonggpu_dc_crtc *dc_crtc)
+{
+	struct loonggpu_device *adev = dc_crtc->dc->adev;
+	struct loonggpu_connector *lconnector;
+	struct loonggpu_backlight *ls_bl;
+	struct drm_connector *connector;
+	int connector_type;
+	u32 crtc_cfg;
+	u32 crtc_id;
+	int i;
+
+	if (IS_ERR_OR_NULL(dc_crtc))
+		return false;
+
+	crtc_id = dc_crtc->resource->base.link;
+	if (crtc_id >= DC_DVO_MAXLINK)
+		return false;
+
+	/* This function is called frequently, so it is advisable to
+	 * avoid performing the same task again. */
+	crtc_cfg = dc_readl(adev, gdc_reg->crtc_reg[crtc_id].cfg);
+	crtc_cfg &= CRTC_CFG_MASK;
+	if (crtc_cfg & CRTC_CFG_ENABLE)
+		return true;
+
+	for (i = 0; i < dc_crtc->dc->links; i++) {
+		lconnector = adev->mode_info.connectors[i];
+		connector = &lconnector->base;
+		if (connector->status == connector_status_connected) {
+			lg_loongson_screen_state(true);
+			break;
+		}
+	}
+
+	connector_type = adev->mode_info.connectors[crtc_id]->base.connector_type;
+	ls_bl = adev->mode_info.backlights[crtc_id];
+	if (ls_bl && ls_bl->power)
+		ls_bl->power(ls_bl, true);
+	else if (backlight_device_get_by_type(BACKLIGHT_PLATFORM) &&
+		(connector_type == DRM_MODE_CONNECTOR_eDP ||
+		 connector_type == DRM_MODE_CONNECTOR_LVDS)) {
+		lg_turn_on_lvds();
+	}
 
 	return true;
 }

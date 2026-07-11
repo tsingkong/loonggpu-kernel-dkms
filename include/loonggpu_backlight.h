@@ -9,7 +9,7 @@
 #include <linux/timer.h>
 
 #define BL_MAX_LEVEL 100
-#define BL_MIN_LEVEL 1
+#define BL_MIN_LEVEL 0
 #define BL_DEF_LEVEL 60
 #define GPIO_LCD_EN 62
 #define GPIO_LCD_VDD 63
@@ -20,6 +20,8 @@
 #define LCD_CTRL_SIGNAL_GET(seq, order)         ((seq >> (order*4)) & LCD_CTRL_SIGNAL_MASK)
 #define LCD_CTRL_DELAY_MASK                     0xffff
 #define LCD_CTRL_DELAY_GET(delay, action)       ((delay >> (action*16)) & LCD_CTRL_DELAY_MASK)
+
+#define PWM_LIGHT_TABLES_MAX  50
 
 enum vbios_lcd_hw_signal {
 	LCD_HW_SIGNAL_NULL,
@@ -65,6 +67,15 @@ struct loonggpu_lcd_ctrl {
 	u32 gpio_ctrl_en;
 };
 
+struct pwm_light {
+	u8 used;
+	u8 level_count;
+	struct {
+		u8 level;
+		u8 duty;
+	} tables[PWM_LIGHT_TABLES_MAX];
+};
+
 struct loonggpu_backlight {
 	void *driver_private;
 	struct backlight_device *device;
@@ -74,6 +85,7 @@ struct loonggpu_backlight {
 	u32 pwm_id;
 	u32 pwm_polarity;
 	u32 pwm_period;
+	struct pwm_light light;
 	bool hw_enabled;
 	u32 level;
 	u32 max;
@@ -89,4 +101,5 @@ struct loonggpu_backlight {
 
 void loonggpu_lcd_ctrl_hw_action(struct loonggpu_backlight *ls_bl, bool open);
 int loonggpu_backlight_register(struct drm_connector *connector);
+int loonggpu_late_register(struct drm_connector *connector);
 #endif /* __LOONGGPU_BACKLIGHT_H__ */

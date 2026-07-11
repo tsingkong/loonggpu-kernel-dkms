@@ -1629,7 +1629,8 @@ static int loonggpu_ttm_access_memory(struct ttm_buffer_object *bo,
 	if (lg_tbo_to_mem(bo)->mem_type != TTM_PL_VRAM)
 		return -EIO;
 
-	DRM_DEBUG_DRIVER("%s Not implemented \n", __FUNCTION__);
+	if (adev->family_type < CHIP_LG200)
+		return -EPERM;
 
 #if defined(LG_DRM_DRM_BUDDY_H_PRESENT)
 	loonggpu_res_first(bo->resource, offset, len, &cursor);
@@ -1640,10 +1641,10 @@ static int loonggpu_ttm_access_memory(struct ttm_buffer_object *bo,
 #endif
 
 	while (len && pos < adev->gmc.mc_vram_size) {
-		uint64_t aligned_pos = pos & ~(uint64_t)3;
 		uint32_t bytes = 4 - (pos & 3);
 		uint32_t shift = (pos & 3) * 8;
 		uint32_t mask = 0xffffffff << shift;
+		uint64_t tmp;
 
 		if (len < bytes) {
 			mask &= 0xffffffff >> (bytes - len) * 8;
@@ -1651,14 +1652,19 @@ static int loonggpu_ttm_access_memory(struct ttm_buffer_object *bo,
 		}
 
 		spin_lock_irqsave(&adev->mmio_idx_lock, flags);
-		WREG32_NO_KIQ(mmMM_INDEX, ((uint32_t)aligned_pos) | 0x80000000);
-		WREG32_NO_KIQ(mmMM_INDEX_HI, aligned_pos >> 31);
-		if (!write || mask != 0xffffffff)
-			value = RREG32_NO_KIQ(mmMM_DATA);
+		loonggpu_cmd_exec(adev, LG2XX_ICMD32(LG2XX_ICMD32_MOP_VRAM, LG2XX_ICMD32_SOP_VRAM_BINDADDR),
+			lower_32_bits(pos + adev->gmc.vram_start),
+			upper_32_bits(pos + adev->gmc.vram_start));
+		if (!write || mask != 0xffffffff) {
+			tmp = loonggpu_cmd_exec(adev, LG2XX_ICMD32(LG2XX_ICMD32_MOP_VRAM,
+				LG2XX_ICMD32_SOP_VRAM_READ), 4, 0);
+			value = lower_32_bits(tmp);
+		}
 		if (write) {
 			value &= ~mask;
 			value |= (*(uint32_t *)buf << shift) & mask;
-			WREG32_NO_KIQ(mmMM_DATA, value);
+			loonggpu_cmd_exec(adev, LG2XX_ICMD32(LG2XX_ICMD32_MOP_VRAM,
+				LG2XX_ICMD32_SOP_VRAM_WRITE), 4, value);
 		}
 		spin_unlock_irqrestore(&adev->mmio_idx_lock, flags);
 		if (!write) {
@@ -2321,17 +2327,24 @@ static ssize_t loonggpu_ttm_vram_read(struct file *f, char __user *buf,
 	if (*pos >= adev->gmc.mc_vram_size)
 		return -ENXIO;
 
+	if (adev->family_type < CHIP_LG200)
+		return -EPERM;
+
 	while (size) {
 		unsigned long flags;
 		uint32_t value;
+		uint64_t tmp;
 
 		if (*pos >= adev->gmc.mc_vram_size)
 			return result;
 
 		spin_lock_irqsave(&adev->mmio_idx_lock, flags);
-		WREG32_NO_KIQ(mmMM_INDEX, ((uint32_t)*pos) | 0x80000000);
-		WREG32_NO_KIQ(mmMM_INDEX_HI, *pos >> 31);
-		value = RREG32_NO_KIQ(mmMM_DATA);
+		loonggpu_cmd_exec(adev, LG2XX_ICMD32(LG2XX_ICMD32_MOP_VRAM, LG2XX_ICMD32_SOP_VRAM_BINDADDR),
+			lower_32_bits(*pos + adev->gmc.vram_start),
+			upper_32_bits(*pos + adev->gmc.vram_start));
+		tmp = loonggpu_cmd_exec(adev, LG2XX_ICMD32(LG2XX_ICMD32_MOP_VRAM,
+			LG2XX_ICMD32_SOP_VRAM_READ), 4, 0);
+		value = lower_32_bits(tmp);
 		spin_unlock_irqrestore(&adev->mmio_idx_lock, flags);
 
 		r = put_user(value, (uint32_t *)buf);
@@ -2365,6 +2378,9 @@ static ssize_t loonggpu_ttm_vram_write(struct file *f, const char __user *buf,
 	if (*pos >= adev->gmc.mc_vram_size)
 		return -ENXIO;
 
+	if (adev->family_type < CHIP_LG200)
+		return -EPERM;
+
 	while (size) {
 		unsigned long flags;
 		uint32_t value;
@@ -2377,9 +2393,11 @@ static ssize_t loonggpu_ttm_vram_write(struct file *f, const char __user *buf,
 			return r;
 
 		spin_lock_irqsave(&adev->mmio_idx_lock, flags);
-		WREG32_NO_KIQ(mmMM_INDEX, ((uint32_t)*pos) | 0x80000000);
-		WREG32_NO_KIQ(mmMM_INDEX_HI, *pos >> 31);
-		WREG32_NO_KIQ(mmMM_DATA, value);
+		loonggpu_cmd_exec(adev, LG2XX_ICMD32(LG2XX_ICMD32_MOP_VRAM, LG2XX_ICMD32_SOP_VRAM_BINDADDR),
+			lower_32_bits(*pos + adev->gmc.vram_start),
+			upper_32_bits(*pos + adev->gmc.vram_start));
+		loonggpu_cmd_exec(adev, LG2XX_ICMD32(LG2XX_ICMD32_MOP_VRAM,
+			LG2XX_ICMD32_SOP_VRAM_WRITE), 4, value);
 		spin_unlock_irqrestore(&adev->mmio_idx_lock, flags);
 
 		result += 4;

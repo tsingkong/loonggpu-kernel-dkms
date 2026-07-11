@@ -505,9 +505,6 @@ static int gfx_cp_gfx_resume(struct loonggpu_device *adev)
 		break;
 	}
 
-	/* Wait a little for things to flush pipeline */
-	mdelay(1000);
-
 	/* Set ring buffer size */
 	ring = &adev->gfx.gfx_ring[0];
 
@@ -719,6 +716,9 @@ static void gfx_ring_emit_fence_gfx(struct loonggpu_ring *ring, u64 addr,
 	
 		if (write64bit)
 			loonggpu_ring_write(ring, upper_32_bits(seq));
+		else
+			loonggpu_ring_write(ring, LG2XX_SCMD32_OP_DBAR);
+
 		if (int_sel)
 			loonggpu_ring_write(ring, GSPKT(LG2XX_SCMD32_OP_INTR, 0));
 
@@ -872,6 +872,14 @@ static void gfx_set_ring_funcs(struct loonggpu_device *adev)
 	case CHIP_LG200:
 	case CHIP_LG210:
 		gfx_ring_funcs_gfx.nop = LG2XX_SCMD32(LG2XX_SCMD32_OP_NOP, 0);
+		gfx_ring_funcs_gfx.emit_frame_size =
+			7 +  /* COND_EXEC */
+			1 +  /* PIPELINE_SYNC */
+			VI_FLUSH_GPU_TLB_NUM_WREG * 5 + 9 + /* VM_FLUSH */
+			5 +  /* FENCE for VM_FLUSH */
+			3 + /* CNTX_CTRL */
+			10 + 10;/* FENCE x2 */
+		gfx_ring_funcs_gfx.emit_ib_size = 5;
 		break;
 	default:
 		DRM_ERROR("%s Illegal Family type %d\n", __FUNCTION__, adev->family_type);

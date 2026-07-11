@@ -22,6 +22,9 @@ void loonggpu_driver_unload_kms(struct drm_device *dev)
 {
 	struct loonggpu_device *adev = dev->dev_private;
 
+	/* clear pwm_loongson_lookup table */
+	lg_pwm_remove_table();
+
 	if (adev == NULL)
 		return;
 

@@ -1006,7 +1006,7 @@ struct dc_reg ls9a1000_dc_reg = {
 		0x38000, /* META_BASE_LOW */
 		0x38004, /* META_BASE_HIG */
 		0x38008, /* META_MASK_LOW */
-		0x3800a, /* META_MASK_HIG */
+		0x3800c, /* META_MASK_HIG */
 		0x38010, /* ZIP_CTL */
 	},
 	.top_reg = {
@@ -1747,7 +1747,8 @@ static void loonggpu_dc_commit_planes(struct drm_atomic_state *state,
 		timing->vsync_start = mode->vsync_start;
 		timing->vsync_end = mode->vsync_end;
 		timing->vrefresh = drm_mode_vrefresh(mode);
-		timing->fixed_vsync_width = 0;
+		timing->fixed_vsync_start = 0;
+		timing->fixed_vsync_end = 0;
 		timing->use_dma = 0;
 
 
@@ -1882,8 +1883,8 @@ static void loonggpu_dc_atomic_commit_tail(struct drm_atomic_state *state)
 		if (old_crtc_state->active && !new_crtc_state->active) {
 			if (drm_atomic_crtc_needs_modeset(new_crtc_state)) {
 				dc_crtc->timing->clock = 0;
-				dc->hw_ops->crtc_enable(dc_crtc, false);
 				dc_interface_enable(dc_crtc, false);
+				dc->hw_ops->crtc_enable(dc_crtc, false);
 			}
 		}
 
@@ -1951,10 +1952,10 @@ static void loonggpu_dc_atomic_commit_tail(struct drm_atomic_state *state)
 
 		if (!new_crtc_state->active) {
 			dc_crtc->timing->clock = 0;
-			dc->hw_ops->crtc_enable(dc_crtc, false);
 			dc_interface_enable(dc_crtc, false);
+			dc->hw_ops->crtc_enable(dc_crtc, false);
 		} else {
-			dc->hw_ops->crtc_enable(dc_crtc, true);
+			set_screen_open(dc_crtc);
 			dc_interface_enable(dc_crtc, true);
 		}
 		loonggpu_dc_commit_planes(state, dev, crtc, &wait_for_vblank);
@@ -2066,7 +2067,8 @@ static void loonggpu_display_print_display_setup(struct drm_device *dev)
 static int dc_initialize_drm_device(struct loonggpu_device *adev)
 {
 	struct loonggpu_mode_info *mode_info = &adev->mode_info;
-	int32_t i;
+	struct loonggpu_dc_crtc *crtc = NULL;
+	int32_t i, j;
 	s32 links = adev->dc->links;
 
 	if (dc_mode_config_init(adev)) {
@@ -2098,6 +2100,16 @@ static int dc_initialize_drm_device(struct loonggpu_device *adev)
 		if (loonggpu_dc_bridge_init(adev, i)) {
 			DRM_ERROR("KMS: Failed to initialize bridge\n");
 			goto fail;
+		}
+	}
+
+	for (i = 0; i < links; i++) {
+		crtc = adev->dc->link_info[i].crtc;
+		for (j = 0; j < crtc->interfaces; j++) {
+			if (crtc->intf[j].type == INTERFACE_DP) {
+				create_virtual_connector(adev->ddev);
+				break;
+			}
 		}
 	}
 
@@ -2199,6 +2211,12 @@ int loonggpu_dc_scale_init(struct loonggpu_device *adev)
 		struct scale_resource *scale_res = NULL;
 		scale_res = dc_get_vbios_resource(dc->vbios,
 						connector->index, LOONGGPU_RESOURCE_SCALE);
+#ifdef LG_VM_PAGE_SIZE_4K
+	/* FIXME: When 4k pages, the CRTC scale function is not supported
+	 * because the virtual address only 128MB.
+	 */
+	scale_res = NULL;
+#endif
 		if (scale_res) {
 			mode = list_first_entry_or_null(&connector->modes,
 											struct drm_display_mode, head);

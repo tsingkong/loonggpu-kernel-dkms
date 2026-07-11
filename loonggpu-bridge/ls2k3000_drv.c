@@ -5,6 +5,7 @@
 #include "loonggpu_dc_reg.h"
 #include "loonggpu_dc_dp.h"
 #include "bridge_phy.h"
+#include "loonggpu_dc_encoder.h"
 
 static enum drm_connector_status ls2k3000_get_connect_status(struct loonggpu_bridge_phy *phy)
 {
@@ -12,8 +13,15 @@ static enum drm_connector_status ls2k3000_get_connect_status(struct loonggpu_bri
 	struct loonggpu_device *adev = phy->adev;
 	struct loonggpu_dc_crtc *crtc = adev->dc->link_info[phy->connector->index].crtc;
 	enum drm_connector_status status = connector_status_disconnected;
+	struct connector_resource *connector_res;
+	struct encoder_resource *encoder_res;
 	u32 reg_val;
+	u32 index;
 	int i;
+
+	index = phy->connector->index;
+	connector_res = adev->dc->link_info[index].connector;
+	encoder_res = adev->dc->link_info[index].encoder->resource;
 
 	if (connector->polled == 0) {
 		status = connector_status_connected;
@@ -30,14 +38,22 @@ static enum drm_connector_status ls2k3000_get_connect_status(struct loonggpu_bri
 				reg_val = dc_readl(adev, gdc_reg->global_reg.hdmi_hp_stat);
 				if (reg_val & 0x1) {
 					crtc->intf[i].connected = true;
+					if (crtc->dc->adev->loongson_hdmi_hda_rmmio)
+						writeb(0x1, crtc->dc->adev->loongson_hdmi_hda_rmmio + 0x2254);
+				} else {
+					if (crtc->dc->adev->loongson_hdmi_hda_rmmio)
+						writeb(0x0, crtc->dc->adev->loongson_hdmi_hda_rmmio + 0x2254);
 				}
 				break;
 			case INTERFACE_DP:
 				/*
 				* Don't clear dp_status, which is set by interrupt asynchronously.
 				* */
-				if (adev->dp_status[1] & 0x2) {
-					crtc->intf[i].connected = true;
+				if ((connector_res->multi_interface && connector_res) ||
+					(encoder_res->chip == ENCODER_CHIP_ID_INTERNAL_DP && encoder_res)) {
+					if (adev->dp_status[1] & 0x2) {
+						crtc->intf[i].connected = true;
+					}
 				}
 				break;
 			case INTERFACE_EDP:
@@ -111,10 +127,22 @@ static struct bridge_phy_hpd_funcs ls2k3000_hpd_funcs = {
 static enum drm_mode_status ls2k3000_mode_valid(struct drm_connector *connector,
 					      struct drm_display_mode *mode)
 {
+	struct loonggpu_device *adev = connector->dev->dev_private;
+	struct panel_resource *panel_resource;
+	struct loonggpu_dc *dc = adev->dc;
+
+	panel_resource = dc_get_vbios_resource(dc->vbios,
+				connector->index, LOONGGPU_RESOURCE_PANEL);
+
 	if (mode->hdisplay > 4096 ||
 	    mode->vdisplay > 2160 ||
 	    mode->vdisplay < 480)
 		return MODE_BAD;
+
+	if (!panel_resource || !panel_resource->feature) {
+		if (mode->clock > 360000)
+			return MODE_BAD;
+	}
 
 	return MODE_OK;
 }
@@ -377,7 +405,6 @@ static struct edid *process_dp_edid(struct drm_connector *dp_connector,
 		return NULL;
 
 	memcpy(dp_edid, valid_edid, EDID_LENGTH * 2);
-	drm_connector_update_edid_property(dp_connector, dp_edid);
 	drm_add_edid_modes(dp_connector, dp_edid);
 	filter_unique_progressive_modes(dp_connector);
 
@@ -426,6 +453,20 @@ static unsigned int combine_edid_results(struct drm_connector *connector,
 	return current_count;
 }
 
+static void probed_modes_clean(struct drm_connector *connector)
+{
+	struct drm_display_mode *mode;
+	struct drm_display_mode *tmp;
+
+	if (!connector || list_empty(&connector->probed_modes))
+		return;
+
+	list_for_each_entry_safe(mode, tmp, &connector->probed_modes, head) {
+		list_del(&mode->head);
+		drm_mode_destroy(connector->dev, mode); /* Free the mode memory */
+	}
+}
+
 /**
  * process_display_interfaces - Process EDID data for HDMI and DisplayPort interfaces
  * @adev: Pointer to the Loongson GPU device structure
@@ -451,7 +492,6 @@ static unsigned int process_display_interfaces(struct loonggpu_device *adev, int
                                               struct loonggpu_bridge_phy *phy)
 {
 	struct edid *hdmi_edid = NULL, *dp_edid = NULL;
-	struct loonggpu_connector *aconnector = NULL;
 	struct drm_connector *dp_connector = NULL;
 	unsigned char valid_edid[256];
 	unsigned long count = 0;
@@ -461,10 +501,6 @@ static unsigned int process_display_interfaces(struct loonggpu_device *adev, int
 	if (dc_crtc->intf[0].type == INTERFACE_HDMI && dc_crtc->intf[0].connected) {
 		hdmi_edid = drm_get_edid(connector, &phy->li2c->adapter);
 		if (hdmi_edid) {
-			aconnector = to_loonggpu_connector(connector);
-			if (is_hpn_special_display(hdmi_edid) || is_eat_special_display(hdmi_edid))
-				aconnector->special_display = true;
-
 			drm_connector_update_edid_property(connector, hdmi_edid);
 			check_hdmi_audio(adev, connector, hdmi_edid);
 			count = drm_add_edid_modes(connector, hdmi_edid);
@@ -476,10 +512,9 @@ static unsigned int process_display_interfaces(struct loonggpu_device *adev, int
 	if (dc_crtc->intf[1].type == INTERFACE_DP && dc_crtc->intf[1].connected) {
 		dp_aux_lock(adev, index, true);
 		if (read_edid_form_aux(adev, index, valid_edid)) {
-			dp_connector = create_virtual_connector(adev->ddev);
-			if (!IS_ERR(dp_connector)) {
-				dp_edid = process_dp_edid(dp_connector, valid_edid);
-			}
+			dp_connector = &adev->mode_info.dp_connector->base;
+			probed_modes_clean(dp_connector);
+			dp_edid = process_dp_edid(dp_connector, valid_edid);
 		}
 		dp_aux_lock(adev, index, false);
 	}
@@ -491,8 +526,8 @@ static unsigned int process_display_interfaces(struct loonggpu_device *adev, int
 	kfree(hdmi_edid);
 	kfree(dp_edid);
 
-	if (dp_connector && !IS_ERR(dp_connector))
-		destroy_virtual_connector(dp_connector);
+	if (dp_connector)
+		probed_modes_clean(dp_connector);
 
 	return count;
 }
@@ -511,12 +546,8 @@ static unsigned int ls2k3000_dc_read_edid(struct loonggpu_device *adev, int inde
 {
 	struct loonggpu_dc_crtc *dc_crtc = adev->dc->link_info[index].crtc;
 	struct loonggpu_bridge_phy *phy = adev->mode_info.encoders[connector->index]->bridge;
-	struct loonggpu_connector *aconnector = NULL;
 	unsigned char valid_edid[256];
 	unsigned long mode_count = 0;
-
-	aconnector = to_loonggpu_connector(connector);
-	aconnector->special_display = false;
 
 	/* Primary display: direct AUX read */
 	if (!index) {

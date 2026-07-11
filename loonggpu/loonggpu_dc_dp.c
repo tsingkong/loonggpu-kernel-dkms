@@ -7,6 +7,7 @@
 #include "loonggpu_dc_resource.h"
 #include "loonggpu_helper.h"
 #include "loonggpu_dc_vbios.h"
+#include "loonggpu_dc_encoder.h"
 #include "bridge_phy.h"
 
 #define DP_IN_MASK    BIT(24)
@@ -25,9 +26,6 @@ static const dp_bandwidth_entry_t bw_table[] = {
 	{ 270000 * 1 / 3, DP_PHY_2P7G,  DP_PHY_X1 , DP_LINK_2P7G,  DP_LINK_X1},
 	{ 270000 * 2 / 3, DP_PHY_2P7G,  DP_PHY_X2 , DP_LINK_2P7G,  DP_LINK_X2},
 	{ 270000 * 4 / 3, DP_PHY_2P7G,  DP_PHY_X4 , DP_LINK_2P7G,  DP_LINK_X4},
-	{ 540000 * 1 / 3, DP_PHY_5P4G,  DP_PHY_X1 , DP_LINK_5P4G,  DP_LINK_X1},
-	{ 540000 * 2 / 3, DP_PHY_5P4G,  DP_PHY_X2 , DP_LINK_5P4G,  DP_LINK_X2},
-	{ 540000 * 4 / 3, DP_PHY_5P4G,  DP_PHY_X4 , DP_LINK_5P4G,  DP_LINK_X4},
 };
 
 static const dp_rate_info_t  rate_table[] = {
@@ -37,8 +35,42 @@ static const dp_rate_info_t  rate_table[] = {
 	{ DP_LINK_2P7G,  DP_PHY_2P7G,  270 },
 	{ DP_LINK_3P24G, DP_PHY_3P24G, 324 },
 	{ DP_LINK_4P32G, DP_PHY_4P32G, 432 },
-	{ DP_LINK_5P4G,  DP_PHY_5P4G,  540 },
 };
+
+/**
+ * For some board designs that do not support multiple display interfaces over a single display link
+ * and have strict power-saving requirements, the DP controller and DP PHY are powered down.
+ **/
+static void ls2k3000_close_dp(struct loonggpu_device *adev, int intf)
+{
+	u32 phy_cfg0, link_cfg0;
+
+	phy_cfg0 = dc_readl(adev, gdc_reg->dp_reg[intf].phy_cfg0);
+	phy_cfg0 &= ~0x1;
+	dc_writel(adev, gdc_reg->dp_reg[intf].phy_cfg0, phy_cfg0);
+
+	link_cfg0 = dc_readl(adev, gdc_reg->dp_reg[intf].link_cfg0);
+	link_cfg0 &= ~0x1;
+	dc_writel(adev, gdc_reg->dp_reg[intf].link_cfg0, link_cfg0);
+}
+
+
+static bool is_use_dp(struct loonggpu_device *adev, int intf, struct connector_resource *connector_res)
+{
+	struct encoder_resource *encoder_res;
+
+	encoder_res = adev->dc->link_info[intf].encoder->resource;
+	if (connector_res && intf && encoder_res) {
+		if ((encoder_res->chip != ENCODER_CHIP_ID_INTERNAL_DP)  \
+			&& !connector_res->multi_interface) {
+			adev->dp_status[1] = 0x8;
+			ls2k3000_close_dp(adev, intf);
+			return false;
+		}
+	}
+
+	return true;
+}
 
 static bool is_csw_special_display(const struct edid *edid)
 {
@@ -53,7 +85,7 @@ static bool is_csw_special_display(const struct edid *edid)
         return false;
     }
 
-    product_code = drm_get_product_code(edid);
+    product_code = EDID_PRODUCT_ID(edid);
     if (strncmp(manufacturer, "CSW", 3) != 0) {
         return false;
     }
@@ -97,9 +129,9 @@ static inline int rate_lane_unsupported(int rate, int lane, int idx)
 		return 1;
 	if ((rate == 162000) && (idx >= 3))
 		return 1;
-	if ((lane == 2) && (idx == 2 || idx == 5 || idx == 8))
+	if ((lane == 2) && (idx == 2 || idx == 5))
 		return 1;
-	if ((lane == 1) && (idx == 1 || idx == 2 || idx == 4 || idx == 5 || idx == 7 || idx == 8))
+	if ((lane == 1) && (idx == 1 || idx == 2 || idx == 4 || idx == 5))
 		return 1;
 
 	return 0;
@@ -172,7 +204,7 @@ unsigned int aux_config(struct loonggpu_device *adev, unsigned int rd_wr, aux_ms
 			(dc_readl(adev, gdc_reg->dp_reg[intf].aux_monitor5) == 0) &&
 			(dc_readl(adev, gdc_reg->dp_reg[intf].aux_monitor6) == 0) &&
 			(dc_readl(adev, gdc_reg->dp_reg[intf].aux_monitor7) == 0)) {
-			DRM_WARN("AUX %s: aux monitor0,5,6,7 is 0 !, addr:0x%x size:%d\n", op_str, aux_msg.addr, aux_msg.size);
+			DRM_WARN("AUX %s: aux monitor0,5,6,7 is 0 !, addr:0x%x size:%d intf-%d\n", op_str, aux_msg.addr, aux_msg.size, intf);
 			return -1;
 		}
 
@@ -270,19 +302,21 @@ fatal_error:
 	return -1;
 }
 
-
+#define MAX_TU 52
 static void dp_recheck_bandwidth(struct loonggpu_device *adev, struct dc_timing_info *timing, dp_feature_t *dp_param, int intf)
 {
 	struct loonggpu_connector *connector = adev->mode_info.connectors[intf];
 	unsigned int i, aux_rate = 0, aux_lane = 0, tu_size = 0;
-	unsigned int link_speed = 0, fix_pixclk = 0, allow_fix = 0;
+	unsigned int link_speed = 0, allow_fix = 0;
 	unsigned int check_flag = 0;
-	unsigned int max_tu_val = 61;
+	unsigned int max_tu_val = MAX_TU;
 	unsigned int vback_porch = 0;
 	aux_msg_t aux_data;
 	int max_rate;
 	int max_lane;
 	int ret = 0;
+	int range_flag = 0;
+	bool last_index = 0;
 
 	aux_data.addr = DPCD_MAX_LINK_RATE_ADDR;
 	aux_data.size = 1;
@@ -311,6 +345,9 @@ static void dp_recheck_bandwidth(struct loonggpu_device *adev, struct dc_timing_
 	dp_param->dp_pixclk = timing->clock;
 	vback_porch = timing->vtotal - timing->vsync_start;
 
+	if (max_rate * max_lane > bw_table[ARRAY_SIZE(bw_table) - 1].bw * 3)
+		range_flag = 1;
+
 	for (i = 0; i < ARRAY_SIZE(bw_table); ) {
 		const dp_bandwidth_entry_t *bw = &bw_table[i];
 
@@ -332,32 +369,31 @@ static void dp_recheck_bandwidth(struct loonggpu_device *adev, struct dc_timing_
 		case DP_LINK_2P7G:
 			link_speed = 270000;
 			break;
-		case DP_LINK_5P4G:
-			link_speed = 540000;
-			break;
 		default:
 			break;
 		}
+
+		last_index = range_flag ? (i == ARRAY_SIZE(bw_table) - 1)
+							    : (max_rate * max_lane == bw_table[i].bw * 3);
 
 		/* Calculate and check fixed vsync width */
 		dp_param->fixed_vsync_width = (u32)((u64)65536 * 2 * 	\
 							timing->clock / link_speed / timing->htotal);
 
 		if (dp_param->fixed_vsync_width >= vback_porch) {
-			if ((max_rate * max_lane != bw_table[i].bw * 3) && (!allow_fix)) {
+			if (!last_index && !allow_fix) {
 				i++;
 				continue;
 			}
 
 			if (allow_fix) {
 				/* second-pass fix */
-				dp_param->fixed_vsync_width = vback_porch - 1;
-				fix_pixclk = (u32)((u64)dp_param->fixed_vsync_width * timing->htotal *
-					link_speed / 65536 / 2);
-
-				if (fix_pixclk < (unsigned int)(timing->clock - 1) && fix_pixclk)
-					dp_param->dp_pixclk = fix_pixclk;
+				dp_param->fixed_vsync_end = timing->vtotal - 1;
+				dp_param->fixed_vsync_start = dp_param->fixed_vsync_end - dp_param->fixed_vsync_width;
 			}
+		} else {
+			dp_param->fixed_vsync_end = timing->vsync_start + dp_param->fixed_vsync_width;
+			dp_param->fixed_vsync_start = timing->vsync_start;
 		}
 
 		tu_size = ((dp_param->dp_pixclk * 64) / bw_table[i].bw) + 1;
@@ -367,28 +403,27 @@ static void dp_recheck_bandwidth(struct loonggpu_device *adev, struct dc_timing_
 			break;
 		}
 
-		if ((max_rate * max_lane == bw_table[i].bw * 3) && allow_fix) {
-			dp_param->dp_pixclk = (max_tu_val * bw_table[i].bw) / 64;
-
-			if (fix_pixclk < (dp_param->dp_pixclk - 1) && fix_pixclk)
-				dp_param->dp_pixclk = fix_pixclk;
-
+		if (last_index && allow_fix) {
+			if (dp_param->dp_pixclk > (max_tu_val * bw_table[i].bw / 64))
+				dp_param->dp_pixclk = (max_tu_val * bw_table[i].bw) / 64;
 			check_flag = 1;
 			break;
 		}
 
 		i++;
 		/* first pass failed, retry with fix enabled */
-		if ((max_rate * max_lane == bw_table[i-1].bw * 3) && !check_flag && !allow_fix) {
+		if (last_index && !check_flag && !allow_fix) {
 			allow_fix = 1;
 			i = 0;
 		}
 	}
 
-	timing->fixed_vsync_width = dp_param->fixed_vsync_width;
+	timing->fixed_vsync_start = dp_param->fixed_vsync_start;
+	timing->fixed_vsync_end = dp_param->fixed_vsync_end;
 
 	/* Workaround for bxc 2.8K (5.4G 2xlnae) resolution display issue */
-	if (is_csw_special_display(connector->base.edid_blob_ptr->data) &&  \
+	if (connector && connector->base.edid_blob_ptr &&
+		is_csw_special_display(connector->base.edid_blob_ptr->data) &&  \
 		timing->hdisplay == 2880 && timing->vdisplay == 1800) {
 		dp_param->dp_phy_rate  = DP_PHY_2P7G;
 		dp_param->dp_phy_xlane = DP_PHY_X4;
@@ -483,8 +518,9 @@ static void edp_converters_recheck_bandwidth(struct loonggpu_device *adev, u32 c
 	return;
 }
 
-static void dp_phy_init(struct loonggpu_device *adev, dp_feature_t dp_param, int intf, uint32_t vswing, uint32_t preemp)
+static void dp_phy_init(struct loonggpu_device *adev, struct dc_timing_info *timing, dp_feature_t dp_param, int intf, uint32_t vswing, uint32_t preemp)
 {
+	struct loonggpu_connector *connector = adev->mode_info.connectors[intf];
 	uint64_t CLK_HS;
 	uint64_t pixelclk_div_N;
 	uint64_t pixelclk_div_F;
@@ -532,6 +568,10 @@ static void dp_phy_init(struct loonggpu_device *adev, dp_feature_t dp_param, int
 	CLK_HS = 2700;
 	pixelclk_div_N = CLK_HS * 1000 / dp_param.dp_pixclk;
 	pixelclk_div_F = CLK_HS * 1000 * 65536 / dp_param.dp_pixclk - pixelclk_div_N * 65536;
+	if (connector && connector->base.edid_blob_ptr &&
+		is_csw_special_display(connector->base.edid_blob_ptr->data) &&  \
+		timing->hdisplay == 2880 && timing->vdisplay == 1800)
+	pixelclk_div_F = pixelclk_div_F / 10000 * 10000;
 
 	/* DP/EDP phy reg 12 TODO*/
 	value = dc_readl(adev, gdc_reg->dp_reg[intf].phy_cfg12);
@@ -649,6 +689,8 @@ static void dp_link_init(struct loonggpu_device *adev, dp_feature_t dp_param, in
 	/* set tu size */
 	tmp  = ((dp_param.dp_pixclk * 3 * dp_color_ratio * 64) / (dp_link_clk * link_lane)) / 1000;
 	tu_video_size = (unsigned int)(tmp & 0xffffffff) + 1;
+	if (tu_video_size > MAX_TU)
+		tu_video_size = MAX_TU;
 
 	DRM_DEBUG_DRIVER("==========================================================\n");
 	DRM_DEBUG_DRIVER("pixclk: 0x%x\n", dp_param.dp_pixclk);
@@ -682,8 +724,20 @@ static void dp_soft_training(struct loonggpu_device *adev, dp_feature_t dp_param
 	bool training_success = false;
 	unsigned int bytes_to_read, active_xlane;
 	unsigned int interval_value, cr_interval, eq_interval;//ms
+	struct encoder_resource *encoder_resource = NULL;
+	bool scale_flags = false;
+
+	if (!intf) {
+		encoder_resource = dc_get_vbios_resource(adev->dc->vbios, intf, LOONGGPU_RESOURCE_ENCODER);
+		if (encoder_resource && ((encoder_resource->chip == ENCODER_CHIP_ID_EDP_ICNM7601) ||  \
+			(encoder_resource->chip == ENCODER_CHIP_ID_EDP_CS5611AQ_S)))
+			scale_flags = true;
+	}
 
 	dp_aux_lock(adev, intf, true);
+
+	if (scale_flags)
+		dc_writel(adev, gdc_reg->dp_reg[intf].link_cfg0, 0x3a10038b);
 
 	/* dp soft reset */
 	value = dc_readl(adev, gdc_reg->dp_reg[intf].link_cfg0);
@@ -765,7 +819,7 @@ static void dp_soft_training(struct loonggpu_device *adev, dp_feature_t dp_param
 	aux_data.data_low = 0;
 	aux_data.data_high = 0;
 	aux_config(adev, READ, aux_data, intf);
-	interval_value = dc_readl(adev, gdc_reg->dp_reg[intf].aux_monitor1) & 0xFF;
+	interval_value = dc_readl(adev, gdc_reg->dp_reg[intf].aux_monitor1) & 0x7F;
 	DRM_DEBUG_DRIVER("Interface %d: Link Status/Adjust Request read interval: 0x%x \n", intf, interval_value);
 	if (interval_value == 0x00) {
 		cr_interval = 2;
@@ -983,12 +1037,24 @@ static void dp_soft_training(struct loonggpu_device *adev, dp_feature_t dp_param
 	if (!lt_done) {
 		DRM_WARN("Interface %d: TPS%s training failed after %d attempts\n", intf, tps3_flag ? "3" : "2", max_retries);
 		aux_data.addr = DPCD_LANE0_1_STATUS_ADDR;
-		aux_data.size = 3;
+		if (scale_flags)
+			aux_data.size = bytes_to_read;
+		else
+			aux_data.size = 3;
 		aux_data.data_low = 0;
 		aux_data.data_high = 0;
 		aux_config(adev, READ, aux_data, intf);
 		tmp = dc_readl(adev,  gdc_reg->dp_reg[intf].aux_monitor1);
 		DRM_WARN("Interface %d: lane status:0x%x, active_xlane:%d\n", intf, tmp, active_xlane);
+		if (scale_flags) {
+			aux_data.addr = DPCD_LANE_ALIGN_STATUS_UPDATED_ADDR;
+			aux_data.size = 1;
+			aux_data.data_low = 0;
+			aux_data.data_high = 0;
+			aux_config(adev, READ, aux_data, intf);
+			interlane_align_done = dc_readl(adev,  gdc_reg->dp_reg[intf].aux_monitor1);
+			DRM_WARN("Interface %d: lane status:0x%x, lane align status:0x%x, active_xlane:%d\n", intf, tmp, interlane_align_done, active_xlane);
+		}
 	}
 
 skip_tps23:
@@ -1069,7 +1135,7 @@ void ls2k3000_dp_pll_set(struct loonggpu_dc_crtc *crtc, int intf, struct dc_timi
 	else
 		edp_converters_recheck_bandwidth(adev, timing->clock, &recheck_dp_param, intf);
 
-	dp_phy_init(adev, recheck_dp_param, intf, 0, 0);
+	dp_phy_init(adev, timing, recheck_dp_param, intf, 0, 0);
 	dp_link_init(adev, recheck_dp_param, intf, timing);
 	dp_soft_training(adev, recheck_dp_param, intf);
 
@@ -1126,67 +1192,45 @@ int ls2k3000_dp_resume(struct loonggpu_dc_crtc *crtc, int intf)
 	return 0;
 }
 
-int ls2k3000_dp_aux_detect_status(struct loonggpu_dc_crtc *crtc, int intf)
+int ls2k3000_dp_aux_detect_status(struct loonggpu_dc_crtc *crtc, int intf, struct connector_resource *resouce)
 {
 	struct loonggpu_device *adev = crtc->dc->adev;
-	struct connector_resource *connector_res;
 	unsigned int detect_flag = 1;
 	aux_msg_t aux_data;
-	u32 link_cfg0;
-	u32 phy_cfg0;
 	int i;
 
-	connector_res = adev->dc->link_info[intf].connector;
-	if (connector_res) {
-		/**
-		" When the hotplug mode is set to interrupt mode, the initial hotplug status during first boot cannot be
-		* retrieved via interrupt when only a DP display is connected. Therefore, the first hotplug connection status
-		* is probed via aux. Additionally, when both DP and EDP are connected simultaneously, the initial connection
-		* status for both EDP and DP cannot be obtained through interrupts either, necessitating AUX probing for their
-		* first connection states as well. However, when the hotplug mode is configured to FORCE_ON, AUX probing for
-		* hotplug status is not required.
-		*/
-		if (connector_res->hotplug != FORCE_ON) {
-			dp_aux_lock(adev, intf, true);
-			aux_data.addr = DPCD_REV_ADDR;
-			aux_data.size = 1;
-			aux_data.data_low = 0;
-			aux_data.data_high = 0;
-			detect_flag = aux_config(adev, READ, aux_data, intf);
-			dp_aux_lock(adev, intf, false);
-			for (i = 0; i < crtc->interfaces; i++) {
-				switch (crtc->intf[i].type) {
-				case INTERFACE_DP:
-					if (!detect_flag) {
-						adev->dp_status[1] = 0x2;
-					} else {
-						adev->dp_status[1] = 0x8;
-					}
-					break;
-				case INTERFACE_EDP:
-					if (!detect_flag) {
-						adev->dp_status[0] = 0x1;
-					} else {
-						adev->dp_status[0] = 0x4;
-					}
-					break;
+	/**
+	" When the hotplug mode is set to interrupt mode, the initial hotplug status during first boot cannot be
+	* retrieved via interrupt when only a DP display is connected. Therefore, the first hotplug connection status
+	* is probed via aux. Additionally, when both DP and EDP are connected simultaneously, the initial connection
+	* status for both EDP and DP cannot be obtained through interrupts either, necessitating AUX probing for their
+	* first connection states as well. However, when the hotplug mode is configured to FORCE_ON, AUX probing for
+	* hotplug status is not required.
+	*/
+	if (resouce->hotplug != FORCE_ON) {
+		dp_aux_lock(adev, intf, true);
+		aux_data.addr = DPCD_REV_ADDR;
+		aux_data.size = 1;
+		aux_data.data_low = 0;
+		aux_data.data_high = 0;
+		detect_flag = aux_config(adev, READ, aux_data, intf);
+		dp_aux_lock(adev, intf, false);
+		for (i = 0; i < crtc->interfaces; i++) {
+			switch (crtc->intf[i].type) {
+			case INTERFACE_DP:
+				if (!detect_flag) {
+					adev->dp_status[1] = 0x2;
+				} else {
+					adev->dp_status[1] = 0x8;
 				}
-			}
-
-			/**
-			 * For some board designs that do not support multiple display interfaces over a single display link
-			 * and have strict power-saving requirements, the DP controller and DP PHY are powered down.
-			 */
-			if (!connector_res->multi_interface && intf) {
-				adev->dp_status[1] = 0x8;
-
-				phy_cfg0 = dc_readl(adev, gdc_reg->dp_reg[intf].phy_cfg0);
-				phy_cfg0 &= ~0x1;
-				dc_writel(adev, gdc_reg->dp_reg[intf].phy_cfg0, phy_cfg0);
-
-				link_cfg0 = dc_readl(adev, gdc_reg->dp_reg[intf].link_cfg0);
-				link_cfg0 &= ~0x1;
-				dc_writel(adev, gdc_reg->dp_reg[intf].link_cfg0, link_cfg0);
+				break;
+			case INTERFACE_EDP:
+				if (!detect_flag) {
+					adev->dp_status[0] = 0x1;
+				} else {
+					adev->dp_status[0] = 0x4;
+				}
+				break;
 			}
 		}
 	}
@@ -1197,11 +1241,16 @@ int ls2k3000_dp_aux_detect_status(struct loonggpu_dc_crtc *crtc, int intf)
 int ls2k3000_dp_init(struct loonggpu_dc_crtc *crtc, int intf)
 {
 	struct loonggpu_device *adev = crtc->dc->adev;
+	struct connector_resource *connector_res;
+
+	connector_res = adev->dc->link_info[intf].connector;
+	if (!is_use_dp(adev, intf, connector_res))
+		return 0;
 
 	dp_aux_init(adev, intf);
 	ls2k3000_dp_noaudio_init(crtc, intf);
 
-	return ls2k3000_dp_aux_detect_status(crtc, intf);
+	return ls2k3000_dp_aux_detect_status(crtc, intf, connector_res);
 }
 
 bool is_dp_hpd_irq(u32 reg)
@@ -1215,15 +1264,26 @@ void dp_aux_lock(struct loonggpu_device *adev, int intf, bool lock)
 {
 	u32 int_reg = 0;
 	u32 lock_mask;
+	u32 tries = 100;
 
-	lock_mask = intf ? DP_LOCK : EDP_LOCK;
-	int_reg	= dc_readl(adev, gdc_reg->global_reg.intr_en);
+	if (lock) {
+		lock_mask = intf ? DP_LOCK : EDP_LOCK;
+		while (tries--) {
+			int_reg	= dc_readl(adev, gdc_reg->global_reg.intr_en);
+			if (!(int_reg & lock_mask))
+				break;
 
-	if (int_reg & lock_mask && lock)
-		return;
+			msleep(1);
+		}
 
-	if (!(int_reg & lock_mask) && !lock)
-		return;
+		if (!tries)
+			DRM_ERROR("dp aux lock timeout!\n");
+	} else {
+		int_reg	= dc_readl(adev, gdc_reg->global_reg.intr_en);
+		/* TODO: use owner to determine whether to release the lock
+		 * because we cannot release the lock of the cpu firmware
+		 */
+	}
 
 	switch (intf) {
 	case 0:
@@ -1282,8 +1342,13 @@ void l2k3000_hpd_irq_handler(struct loonggpu_device *adev, struct loonggpu_iv_en
 void l2k3000_dp_first_hdp_detect(struct loonggpu_dc_crtc *crtc, int intf)
 {
 	struct loonggpu_device *adev = crtc->dc->adev;
+	struct connector_resource *connector_res;
 	dp_feature_t dp_param;
 	aux_msg_t aux_msg;
+
+	connector_res = adev->dc->link_info[intf].connector;
+	if (!is_use_dp(adev, intf, connector_res))
+		return;
 
 	/*
 	* When entering S3 or S4 states with no EDP or DP connected, the enable bits of the aux_channel0and
@@ -1301,7 +1366,7 @@ void l2k3000_dp_first_hdp_detect(struct loonggpu_dc_crtc *crtc, int intf)
 	* The AUX functionality depends on the EDP/DP PHY. Therefore, the EDP/DP PHY must be
 	* initialized prior to probing the link status via AUX
 	*/
-	dp_phy_init(adev, dp_param, intf, 0x7, 0);
+	dp_phy_init(adev, crtc->timing, dp_param, intf, 0x7, 0);
 
 	/*
 	* Prior to entering S3 or S4 states, if no EDP/DP display is connected, a power off and on
@@ -1324,7 +1389,7 @@ void l2k3000_dp_first_hdp_detect(struct loonggpu_dc_crtc *crtc, int intf)
 	udelay(10000);
 	dp_aux_lock(adev, intf, false);
 
-	ls2k3000_dp_aux_detect_status(crtc, intf);
+	ls2k3000_dp_aux_detect_status(crtc, intf, connector_res);
 }
 
 int ls2k3000_dp_audio_init(struct loonggpu_dc_crtc *crtc, int intf)

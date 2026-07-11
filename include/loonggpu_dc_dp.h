@@ -71,6 +71,8 @@ typedef struct dp_feature {
 	unsigned int dp_pixclk;
 	unsigned int dp_link_rate;
 	unsigned int dp_link_xlane;
+	unsigned int fixed_vsync_start;
+	unsigned int fixed_vsync_end;
 	unsigned int fixed_vsync_width;
 } dp_feature_t;
 
